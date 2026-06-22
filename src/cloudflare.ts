@@ -248,6 +248,9 @@ export class CodexAuthVault extends DurableObject<Env> {
 				this.assertAdmin(request);
 				return jsonResponse(await this.startDeviceLogin());
 			}
+			if (request.method === 'GET' && url.pathname === '/oauth/device/status') {
+				return jsonResponse(await this.deviceLoginStatus(url.searchParams.get('state')));
+			}
 			if (request.method === 'POST' && url.pathname === '/oauth/device/complete') {
 				return jsonResponse(await this.completeDeviceLogin(url.searchParams.get('state')));
 			}
@@ -297,6 +300,29 @@ export class CodexAuthVault extends DurableObject<Env> {
 			expiresAt: Date.now() + DEVICE_CODE_TIMEOUT_MS,
 		};
 		await this.ctx.storage.put(this.deviceStateKey(state), stateRecord);
+
+		return {
+			state,
+			userCode: stateRecord.userCode,
+			verificationUri: stateRecord.verificationUri,
+			intervalSeconds: stateRecord.intervalSeconds,
+			expiresAt: new Date(stateRecord.expiresAt).toISOString(),
+		};
+	}
+
+	private async deviceLoginStatus(state: string | null): Promise<DeviceStartResponse> {
+		if (!state) {
+			throw new HttpError('Missing device login state.', 400);
+		}
+
+		const stateRecord = await this.ctx.storage.get<DeviceAuthState>(this.deviceStateKey(state));
+		if (!stateRecord) {
+			throw new HttpError('Device login state was not found or already used.', 404);
+		}
+		if (Date.now() > stateRecord.expiresAt) {
+			await this.ctx.storage.delete(this.deviceStateKey(state));
+			throw new HttpError('Device login expired. Start again.', 410);
+		}
 
 		return {
 			state,

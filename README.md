@@ -19,7 +19,7 @@ Cloudflare-targeted Flue agent that gives a PI-powered agent access to Matt Poco
   - `src/channels/telegram.ts` exposes `POST /channels/telegram/webhook`.
   - Incoming Telegram messages dispatch to the `teacher` agent instance for that chat/topic.
   - The agent gets a scoped `post_telegram_message` tool so it can reply in the same conversation.
-  - `/model`, `/new`, `/session`, `/pages`, and `/help` are handled directly by the bot.
+  - `/model`, `/codex`, `/new`, `/session`, `/pages`, and `/help` are handled directly by the bot.
 
 ## Codex auth setup
 
@@ -47,14 +47,15 @@ TELEGRAM_ALLOWED_USER_IDS="123456789"
 ZAI_API_KEY="zai-api-key"
 ```
 
-Open the deployed Codex web login route instead of creating `auth.json` locally:
+From Telegram, send `/codex` and tap **Open Codex login**. The bot creates a short-lived browser login link, shows the OpenAI code, and stores the credentials automatically after approval.
+
+The protected admin login route is still available as a fallback:
 
 ```txt
 https://sapio-flue-teacher.<your-subdomain>.workers.dev/admin/codex-auth/login?admin_token=<CODEX_AUTH_ADMIN_TOKEN>
 ```
 
-The page starts PI/OpenAI Codex device login, sends you to OpenAI to approve the
-ChatGPT Plus/Pro account, then stores the OAuth credentials for the Worker.
+Both paths use the PI/OpenAI Codex OAuth credential shape and store the OAuth credentials for the Worker.
 
 Check that the Vault object is configured without exposing tokens:
 

@@ -7,6 +7,7 @@ import {
 	teachingPageIndexUrl,
 	teachingPageStore,
 	teachingPageUrl,
+	publicBaseUrl,
 	type TeachingPageBindingEnv,
 	type TeachingPageRecord,
 } from './teaching-pages';
@@ -77,6 +78,44 @@ app.get('/teach', (c) =>
 	),
 );
 app.get('/teach/*', serveTeachingPage);
+
+app.get('/codex-auth/device', async (c) => {
+	const state = c.req.query('state') ?? '';
+	const stub = getCodexAuthVault(c.env);
+	const response = await stub.fetch(
+		new Request(`https://codex-auth-vault/oauth/device/status?state=${encodeURIComponent(state)}`),
+	);
+	if (!response.ok) {
+		return htmlResponse(await errorPage('Codex login not available', await response.text()), {
+			status: response.status,
+		});
+	}
+
+	const start = (await response.json()) as {
+		state: string;
+		userCode: string;
+		verificationUri: string;
+		intervalSeconds: number;
+		expiresAt: string;
+	};
+
+	return htmlResponse(renderCodexDeviceLoginPage(c.env, start));
+});
+
+app.post('/codex-auth/device/complete', async (c) => {
+	const state = c.req.query('state') ?? '';
+	const stub = getCodexAuthVault(c.env);
+	const response = await stub.fetch(
+		new Request(`https://codex-auth-vault/oauth/device/complete?state=${encodeURIComponent(state)}`, {
+			method: 'POST',
+		}),
+	);
+	const body = await response.text();
+	return new Response(body, {
+		status: response.status,
+		headers: { 'content-type': response.headers.get('content-type') ?? 'application/json; charset=utf-8' },
+	});
+});
 
 app.post('/admin/telegram/register-commands', async (c) => {
 	const auth = telegramAdminAuth(c);
@@ -180,37 +219,10 @@ app.get('/admin/codex-auth/login', async (c) => {
 		verificationUri: string;
 		expiresAt: string;
 	};
-	const completeUrl = new URL(c.req.url);
-	completeUrl.pathname = '/admin/codex-auth/device/complete';
-	completeUrl.search = new URLSearchParams({ state: start.state }).toString();
-
-	return htmlResponse(
-		`<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Codex Login</title>
-  <style>
-    body { font: 16px/1.45 system-ui, sans-serif; max-width: 680px; margin: 48px auto; padding: 0 20px; color: #111; }
-    code { font-size: 28px; font-weight: 700; letter-spacing: .08em; background: #f2f2f2; padding: 12px 16px; display: inline-block; border-radius: 8px; }
-    a, button { font: inherit; }
-    .button { display: inline-block; margin: 16px 12px 0 0; padding: 10px 14px; background: #111; color: #fff; border-radius: 6px; text-decoration: none; }
-    .secondary { background: #eee; color: #111; }
-  </style>
-</head>
-<body>
-  <h1>Login to Codex</h1>
-  <p>Open the Codex device login page and enter this code:</p>
-  <p><code>${escapeHtml(start.userCode)}</code></p>
-  <p>
-    <a class="button" href="${escapeHtml(start.verificationUri)}" target="_blank" rel="noreferrer">Open Codex Login</a>
-    <a class="button secondary" href="${escapeHtml(completeUrl.toString())}">Finish Login</a>
-  </p>
-  <p>This code expires at ${escapeHtml(start.expiresAt)}. After approving the login, return here and click Finish Login.</p>
-</body>
-</html>`,
-	);
+	const loginUrl = new URL(c.req.url);
+	loginUrl.pathname = '/codex-auth/device';
+	loginUrl.search = new URLSearchParams({ state: start.state }).toString();
+	return c.redirect(loginUrl.toString());
 });
 
 app.get('/admin/codex-auth/device/complete', async (c) => {
@@ -294,6 +306,7 @@ function telegramBotCommands(): Array<{ command: string; description: string }> 
 		{ command: 'start', description: 'Start the teacher bot' },
 		{ command: 'help', description: 'Show bot commands' },
 		{ command: 'model', description: 'Show or switch the model' },
+		{ command: 'codex', description: 'Connect Codex with browser login' },
 		{ command: 'new', description: 'Start a clean session' },
 		{ command: 'session', description: 'Show the current session' },
 		{ command: 'pages', description: 'Show hosted or referenced lesson pages' },
@@ -390,6 +403,80 @@ function renderTeachingPageIndex(
 	}
 	</body>
 	</html>`;
+}
+
+function renderCodexDeviceLoginPage(
+	env: Env,
+	start: {
+		state: string;
+		userCode: string;
+		verificationUri: string;
+		intervalSeconds: number;
+		expiresAt: string;
+	},
+): string {
+	const completeUrl = new URL('/codex-auth/device/complete', publicBaseUrl(env));
+	completeUrl.searchParams.set('state', start.state);
+	const intervalMs = Math.max(2, start.intervalSeconds || 5) * 1000;
+
+	return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Codex Login</title>
+  <style>
+    :root { color-scheme: light; }
+    body { font: 16px/1.45 system-ui, sans-serif; max-width: 680px; margin: 48px auto; padding: 0 20px; color: #111; background: #fff; }
+    h1 { font-size: 28px; line-height: 1.15; margin: 0 0 16px; }
+    p { margin: 12px 0; }
+    code { font-size: 30px; font-weight: 700; letter-spacing: .08em; background: #f2f2f2; padding: 12px 16px; display: inline-block; border-radius: 8px; }
+    .button { display: inline-block; margin: 18px 12px 0 0; padding: 10px 14px; background: #111; color: #fff; border-radius: 6px; text-decoration: none; }
+    .muted { color: #555; }
+    .status { margin-top: 22px; padding: 12px 14px; border: 1px solid #ddd; border-radius: 8px; background: #fafafa; }
+    .error { color: #9f1239; }
+    .success { color: #166534; }
+  </style>
+</head>
+<body>
+  <h1>Login to Codex</h1>
+  <p>Open the Codex login page, enter this code if asked, and approve the ChatGPT account.</p>
+  <p><code>${escapeHtml(start.userCode)}</code></p>
+  <p><a class="button" href="${escapeHtml(start.verificationUri)}" target="_blank" rel="noreferrer">Open Codex Login</a></p>
+  <p class="muted">This code expires at ${escapeHtml(start.expiresAt)}.</p>
+  <div class="status" id="status">Waiting for approval...</div>
+  <script>
+    const statusEl = document.getElementById('status');
+    const completeUrl = ${JSON.stringify(completeUrl.toString())};
+    const intervalMs = ${JSON.stringify(intervalMs)};
+
+    async function poll() {
+      try {
+        const response = await fetch(completeUrl, { method: 'POST' });
+        const result = await response.json().catch(() => ({}));
+        if (response.ok && result.status === 'complete') {
+          statusEl.className = 'status success';
+          statusEl.textContent = 'Codex login complete. You can close this tab and return to Telegram.';
+          return;
+        }
+        if (response.ok && result.status === 'pending') {
+          statusEl.className = 'status';
+          statusEl.textContent = 'Still waiting for approval...';
+          window.setTimeout(poll, intervalMs);
+          return;
+        }
+        statusEl.className = 'status error';
+        statusEl.textContent = result.error || 'Codex login failed. Start a new login from Telegram.';
+      } catch (error) {
+        statusEl.className = 'status error';
+        statusEl.textContent = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    window.setTimeout(poll, intervalMs);
+  </script>
+</body>
+</html>`;
 }
 
 function adminToken(c: { req: { header(name: string): string | undefined; query(name: string): string | undefined } }): string {

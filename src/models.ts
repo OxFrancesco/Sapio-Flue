@@ -33,7 +33,7 @@ export const TELEGRAM_MODEL_OPTIONS: Record<TelegramModelKey, TelegramModelOptio
 		label: 'Codex GPT-5.5',
 		specifier: OPENAI_CODEX_MODEL,
 		aliases: ['codex', 'openai', 'gpt', 'gpt5.5', 'gpt-5.5'],
-		note: 'Codex auth is configured, but Cloudflare Worker egress is currently blocked by chatgpt.com.',
+		note: 'Use /codex to connect a ChatGPT Plus/Pro account when credentials need refreshing.',
 	},
 };
 

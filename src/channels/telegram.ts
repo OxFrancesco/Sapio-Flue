@@ -18,10 +18,13 @@ import {
 	shareIdForAgentId,
 	teachingPageIndexUrl,
 	teachingPageUrl,
+	publicBaseUrl,
 	type TeachingPageBindingEnv,
 } from '../teaching-pages';
 
 interface TelegramChannelBindings extends TeachingPageBindingEnv {
+	CODEX_AUTH_ADMIN_TOKEN?: string;
+	CODEX_AUTH_VAULT?: DurableObjectNamespace;
 	TELEGRAM_BOT_STATE?: DurableObjectNamespace;
 	TELEGRAM_ALLOWED_USER_IDS?: string;
 }
@@ -165,6 +168,7 @@ type UxCallbackAction =
 	| 'ux:model'
 	| 'ux:model:zai'
 	| 'ux:model:codex'
+	| 'ux:codex'
 	| 'ux:pages'
 	| 'ux:examples'
 	| 'ux:new:ask'
@@ -176,11 +180,26 @@ interface TelegramTextResponse {
 	replyMarkup?: InlineKeyboardMarkup;
 }
 
+interface CodexDeviceStartResponse {
+	state: string;
+	userCode: string;
+	verificationUri: string;
+	intervalSeconds: number;
+	expiresAt: string;
+}
+
+interface CodexStatusResponse {
+	configured: boolean;
+	expiresAt?: string;
+	updatedAt?: string;
+}
+
 const UX_CALLBACK_ACTIONS = new Set<string>([
 	'ux:menu',
 	'ux:model',
 	'ux:model:zai',
 	'ux:model:codex',
+	'ux:codex',
 	'ux:pages',
 	'ux:examples',
 	'ux:new:ask',
@@ -211,6 +230,20 @@ async function handleCommand(
 		await sendText(ref, sessionText(await getConversationState(env, conversationId)), {
 			replyMarkup: commandCenterKeyboard(),
 		});
+		return;
+	}
+
+	if (command.name === 'codex') {
+		try {
+			await sendResponse(
+				ref,
+				command.args.trim().toLowerCase() === 'status'
+					? await codexStatusResponse(env)
+					: await codexLoginResponse(env),
+			);
+		} catch (error) {
+			await sendText(ref, codexErrorText(error), { replyMarkup: commandCenterKeyboard() });
+		}
 		return;
 	}
 
@@ -290,6 +323,15 @@ async function handleUxCallback(
 	if (action === 'ux:model') {
 		const state = await getConversationState(env, conversationId);
 		await sendText(ref, modelText(state), { replyMarkup: modelKeyboard(state) });
+		return;
+	}
+
+	if (action === 'ux:codex') {
+		try {
+			await sendResponse(ref, await codexLoginResponse(env));
+		} catch (error) {
+			await sendText(ref, codexErrorText(error), { replyMarkup: commandCenterKeyboard() });
+		}
 		return;
 	}
 
@@ -634,7 +676,7 @@ function commandCenterText(state: TelegramAgentState): string {
 		`Session: ${state.sessionId}`,
 		'',
 		'Send a topic or question directly, or use the buttons below.',
-		'Commands: /model, /new, /pages, /session, /whoami',
+		'Commands: /model, /codex, /new, /pages, /session, /whoami',
 	].join('\n');
 }
 
@@ -656,7 +698,7 @@ function modelText(state: TelegramAgentState): string {
 		'',
 		describeTelegramModels(),
 		'',
-		'Tap a model, or use /model zai or /model codex.',
+		'Tap a model, or use /model zai or /model codex. Use /codex to connect ChatGPT.',
 		model.note ? `Note: ${model.note}` : undefined,
 	]
 		.filter(Boolean)
@@ -669,7 +711,7 @@ function unknownModelText(input: string): string {
 		'',
 		describeTelegramModels(),
 		'',
-		'Tap a model, or use /model zai or /model codex.',
+		'Tap a model, or use /model zai or /model codex. Use /codex to connect ChatGPT.',
 	].join('\n');
 }
 
@@ -726,7 +768,10 @@ function commandCenterKeyboard(): InlineKeyboardMarkup {
 			callbackButton('Model', 'ux:model'),
 		],
 		[
+			callbackButton('Codex login', 'ux:codex'),
 			callbackButton('Pages', 'ux:pages'),
+		],
+		[
 			callbackButton('Examples', 'ux:examples'),
 		],
 	]);
@@ -738,6 +783,14 @@ function modelKeyboard(state: TelegramAgentState): InlineKeyboardMarkup {
 			callbackButton(modelButtonText('zai', state.modelKey), 'ux:model:zai'),
 			callbackButton(modelButtonText('codex', state.modelKey), 'ux:model:codex'),
 		],
+		[callbackButton('Codex login', 'ux:codex')],
+		[callbackButton('Menu', 'ux:menu')],
+	]);
+}
+
+function codexLoginKeyboard(loginUrl: string): InlineKeyboardMarkup {
+	return inlineKeyboard([
+		[urlButton('Open Codex login', loginUrl)],
 		[callbackButton('Menu', 'ux:menu')],
 	]);
 }
@@ -799,6 +852,88 @@ function telegramAllowedUserIds(env: TelegramChannelBindings): Set<string> | und
 		.map((id) => id.trim())
 		.filter(Boolean);
 	return ids?.length ? new Set(ids) : undefined;
+}
+
+async function codexLoginResponse(env: TelegramChannelBindings): Promise<TelegramTextResponse> {
+	const [start, status] = await Promise.all([
+		startCodexDeviceLogin(env),
+		readCodexStatus(env).catch(() => undefined),
+	]);
+	const loginUrl = new URL('/codex-auth/device', publicBaseUrl(env));
+	loginUrl.searchParams.set('state', start.state);
+
+	return {
+		text: [
+			'Codex login',
+			codexStatusLine(status),
+			'',
+			'Tap the button below, open the Codex login page, and approve the ChatGPT account.',
+			`Code: ${start.userCode}`,
+			`Expires: ${start.expiresAt}`,
+			'',
+			'After approval, the browser page stores the credentials automatically.',
+		].join('\n'),
+		replyMarkup: codexLoginKeyboard(loginUrl.toString()),
+	};
+}
+
+async function codexStatusResponse(env: TelegramChannelBindings): Promise<TelegramTextResponse> {
+	return {
+		text: ['Codex auth', codexStatusLine(await readCodexStatus(env))].join('\n'),
+		replyMarkup: commandCenterKeyboard(),
+	};
+}
+
+async function startCodexDeviceLogin(
+	env: TelegramChannelBindings,
+): Promise<CodexDeviceStartResponse> {
+	if (!env.CODEX_AUTH_VAULT) {
+		throw new Error('CODEX_AUTH_VAULT Durable Object binding is not configured.');
+	}
+	if (!env.CODEX_AUTH_ADMIN_TOKEN) {
+		throw new Error('CODEX_AUTH_ADMIN_TOKEN is not configured.');
+	}
+
+	const response = await env.CODEX_AUTH_VAULT.getByName('default').fetch(
+		new Request('https://codex-auth-vault/oauth/device/start', {
+			method: 'POST',
+			headers: { authorization: `Bearer ${env.CODEX_AUTH_ADMIN_TOKEN}` },
+		}),
+	);
+	if (!response.ok) {
+		throw new Error(`Unable to start Codex login (${response.status}): ${await response.text()}`);
+	}
+
+	return (await response.json()) as CodexDeviceStartResponse;
+}
+
+async function readCodexStatus(env: TelegramChannelBindings): Promise<CodexStatusResponse> {
+	if (!env.CODEX_AUTH_VAULT) {
+		throw new Error('CODEX_AUTH_VAULT Durable Object binding is not configured.');
+	}
+
+	const response = await env.CODEX_AUTH_VAULT.getByName('default').fetch(
+		new Request('https://codex-auth-vault/status'),
+	);
+	if (!response.ok) {
+		throw new Error(`Unable to read Codex auth status (${response.status}): ${await response.text()}`);
+	}
+
+	return (await response.json()) as CodexStatusResponse;
+}
+
+function codexStatusLine(status: CodexStatusResponse | undefined): string {
+	if (!status) {
+		return 'Status: unable to read current credentials.';
+	}
+	if (!status.configured) {
+		return 'Status: not connected yet.';
+	}
+	return `Status: connected. Token expires: ${status.expiresAt ?? 'unknown'}.`;
+}
+
+function codexErrorText(error: unknown): string {
+	return `Unable to start Codex login: ${error instanceof Error ? error.message : String(error)}`;
 }
 
 async function pagesResponse(
