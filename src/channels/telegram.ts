@@ -27,6 +27,7 @@ export type TelegramTeacherInput =
 			type: 'telegram.message';
 			updateId: number;
 			text: string;
+			draftId?: number;
 			message: Message;
 	  }
 	| {
@@ -61,12 +62,15 @@ export const channel = createTelegramChannel<{ Bindings: TelegramChannelBindings
 
 			const state = await getConversationState(c.env, conversationId);
 			const agentId = buildTelegramAgentId(conversationId, state);
+			const draftId = update.update_id || Date.now();
+			const progressMode = await startTelegramProgress(ref, draftId);
 			const receipt = await dispatch(teacher, {
 				id: agentId,
 				input: {
 					type: 'telegram.message',
 					updateId: update.update_id,
 					text: messageText(incoming),
+					...(progressMode === 'message_draft' ? { draftId } : {}),
 					message: incoming,
 				} satisfies TelegramTeacherInput,
 			});
@@ -77,6 +81,7 @@ export const channel = createTelegramChannel<{ Bindings: TelegramChannelBindings
 				agentId,
 				modelKey: state.modelKey,
 				sessionId: state.sessionId,
+				progressMode,
 				dispatchId: receipt.dispatchId,
 			});
 			return;
@@ -193,7 +198,8 @@ async function handleCommand(
 export function postMessage(ref: TelegramConversationRef) {
 	return defineTool({
 		name: 'post_telegram_message',
-		description: 'Post a message to the Telegram conversation bound to this teacher agent.',
+		description:
+			'Post a message to the Telegram conversation bound to this teacher agent. If the telegram.message input includes draftId, pass it here unchanged so the answer can be streamed as a Telegram draft before it is persisted.',
 		parameters: {
 			type: 'object',
 			properties: {
@@ -201,30 +207,31 @@ export function postMessage(ref: TelegramConversationRef) {
 					type: 'string',
 					minLength: 1,
 				},
+				draftId: {
+					type: 'number',
+					description: 'The draftId from the telegram.message input, when present.',
+					minimum: 1,
+				},
 			},
 			required: ['text'],
 			additionalProperties: false,
 		},
-		async execute({ text }) {
+		async execute({ text, draftId }) {
 			console.log('[telegram:send] sending message', {
 				chatId: ref.chatId,
 				type: ref.type,
 				textLength: text.length,
+				hasDraftId: typeof draftId === 'number',
 			});
-			const message = await client.sendMessage(ref.chatId, text, {
-				...(ref.type === 'business-chat'
-					? { business_connection_id: ref.businessConnectionId }
-					: {}),
-				...(ref.messageThreadId ? { message_thread_id: ref.messageThreadId } : {}),
-				...(ref.directMessagesTopicId
-					? { direct_messages_topic_id: ref.directMessagesTopicId }
-					: {}),
-			});
+			if (typeof draftId === 'number' && Number.isFinite(draftId)) {
+				await streamTelegramDraft(ref, draftId, text);
+			}
+			const messages = await sendTextChunks(ref, text);
 			console.log('[telegram:send] sent message', {
 				chatId: ref.chatId,
-				messageId: message.message_id,
+				messageIds: messages.map((message) => message.message_id),
 			});
-			return JSON.stringify({ messageId: message.message_id });
+			return JSON.stringify({ messageIds: messages.map((message) => message.message_id) });
 		},
 	});
 }
@@ -283,13 +290,152 @@ function stateRequest(conversationId: string, init?: RequestInit): Request {
 }
 
 async function sendText(ref: TelegramConversationRef, text: string): Promise<void> {
-	await client.sendMessage(ref.chatId, text, {
+	await sendTextChunks(ref, text);
+}
+
+async function sendTextChunks(ref: TelegramConversationRef, text: string): Promise<Message.TextMessage[]> {
+	const chunks = splitTelegramText(text);
+	const messages: Message.TextMessage[] = [];
+	for (const chunk of chunks) {
+		messages.push(
+			await client.sendMessage(ref.chatId, chunk, {
+				...(ref.type === 'business-chat'
+					? { business_connection_id: ref.businessConnectionId }
+					: {}),
+				...(ref.messageThreadId ? { message_thread_id: ref.messageThreadId } : {}),
+				...(ref.directMessagesTopicId ? { direct_messages_topic_id: ref.directMessagesTopicId } : {}),
+			}),
+		);
+	}
+	return messages;
+}
+
+type TelegramProgressMode = 'message_draft' | 'chat_action' | 'none';
+
+async function startTelegramProgress(
+	ref: TelegramConversationRef,
+	draftId: number,
+): Promise<TelegramProgressMode> {
+	if (canUseMessageDraft(ref)) {
+		try {
+			await client.sendMessageDraft(ref.chatId, draftId, '');
+			return 'message_draft';
+		} catch (error) {
+			console.warn('[telegram:draft] unable to start draft progress', error);
+		}
+	}
+
+	try {
+		await sendTypingAction(ref);
+		return 'chat_action';
+	} catch (error) {
+		console.warn('[telegram:typing] unable to start typing action', error);
+		return 'none';
+	}
+}
+
+async function streamTelegramDraft(
+	ref: TelegramConversationRef,
+	draftId: number,
+	text: string,
+): Promise<void> {
+	if (!canUseMessageDraft(ref)) {
+		return;
+	}
+
+	const chunks = draftPreviewChunks(text);
+	if (chunks.length === 0) {
+		return;
+	}
+
+	try {
+		for (const chunk of chunks) {
+			await client.sendMessageDraft(ref.chatId, draftId, chunk);
+			await sleep(140);
+		}
+	} catch (error) {
+		console.warn('[telegram:draft] unable to stream draft', error);
+	}
+}
+
+async function sendTypingAction(ref: TelegramConversationRef): Promise<void> {
+	await client.sendChatAction(ref.chatId, 'typing', {
 		...(ref.type === 'business-chat'
 			? { business_connection_id: ref.businessConnectionId }
 			: {}),
 		...(ref.messageThreadId ? { message_thread_id: ref.messageThreadId } : {}),
 		...(ref.directMessagesTopicId ? { direct_messages_topic_id: ref.directMessagesTopicId } : {}),
 	});
+}
+
+function canUseMessageDraft(
+	ref: TelegramConversationRef,
+): ref is TelegramConversationRef & { type: 'chat'; chatId: number } {
+	return ref.type === 'chat' && ref.chatId > 0 && ref.directMessagesTopicId === undefined;
+}
+
+function draftPreviewChunks(text: string): string[] {
+	const preview = text.trim().slice(0, 4096);
+	if (preview.length === 0) {
+		return [];
+	}
+	if (preview.length <= 72) {
+		return [preview];
+	}
+
+	const targetCount = Math.min(10, Math.max(3, Math.ceil(preview.length / 260)));
+	const chunks: string[] = [];
+	for (let index = 1; index <= targetCount; index += 1) {
+		const target = Math.ceil((preview.length * index) / targetCount);
+		const boundary = nearestWordBoundary(preview, target);
+		const chunk = preview.slice(0, boundary).trimEnd();
+		if (chunk && chunk !== chunks.at(-1)) {
+			chunks.push(chunk);
+		}
+	}
+	if (chunks.at(-1) !== preview) {
+		chunks.push(preview);
+	}
+	return chunks;
+}
+
+function splitTelegramText(text: string): string[] {
+	const chunks: string[] = [];
+	let remaining = text;
+	while (remaining.length > 0) {
+		if (remaining.length <= 4000) {
+			chunks.push(remaining);
+			break;
+		}
+
+		const boundary = nearestWordBoundary(remaining, 4000);
+		chunks.push(remaining.slice(0, boundary).trimEnd());
+		remaining = remaining.slice(boundary).trimStart();
+	}
+	return chunks.length ? chunks : [''];
+}
+
+function nearestWordBoundary(text: string, target: number): number {
+	const bounded = Math.min(Math.max(target, 1), text.length);
+	if (bounded === text.length) {
+		return text.length;
+	}
+
+	const previous = text.lastIndexOf(' ', bounded);
+	if (previous >= Math.max(1, bounded - 80)) {
+		return previous;
+	}
+
+	const next = text.indexOf(' ', bounded);
+	if (next > 0 && next <= bounded + 80) {
+		return next;
+	}
+
+	return bounded;
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function parseCommand(text: string): BotCommand | undefined {

@@ -147,6 +147,8 @@ Bot commands:
 
 The bot stores the selected model and current session id per Telegram chat/topic in the `TelegramBotState` Durable Object. A new session is implemented as a new Flue agent instance id, so old session history remains durable but stops being used.
 
+For one-to-one chats, non-command prompts use Telegram message drafts: the bot immediately shows a native "Thinking..." draft, then previews the generated reply through draft updates before sending the final persistent message. Group, topic, direct-message, and business contexts fall back to Telegram's typing action when drafts are not supported.
+
 Register the Telegram menu commands after deploying:
 
 ```bash

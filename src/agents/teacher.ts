@@ -57,7 +57,7 @@ export default createAgent<unknown, Env>(async ({ env, id }) => {
 				? `This Telegram session is ${selection.state.sessionId} and uses ${telegramModel.label}. `
 				: '') +
 			(telegramRef
-				? 'This session is bound to a Telegram conversation. For every telegram.message input, treat the text field as the user message and call post_telegram_message exactly once with your reply. Do not answer only in plain assistant text because the Telegram user cannot see it.'
+				? 'This session is bound to a Telegram conversation. For every telegram.message input, treat the text field as the user message and call post_telegram_message exactly once with your reply. If the input includes draftId, pass that exact draftId to post_telegram_message so Telegram can stream the reply preview before the final message is saved. Do not answer only in plain assistant text because the Telegram user cannot see it.'
 				: ''),
 	};
 });
