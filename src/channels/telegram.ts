@@ -1,7 +1,7 @@
 import { createTelegramChannel, type TelegramConversationRef } from '@flue/telegram';
 import { defineTool, dispatch } from '@flue/runtime';
 import { Api } from 'grammy';
-import type { Message } from 'grammy/types';
+import type { InlineKeyboardMarkup, Message } from 'grammy/types';
 import teacher from '../agents/teacher';
 import {
 	buildTelegramAgentId,
@@ -113,7 +113,20 @@ export const channel = createTelegramChannel<{ Bindings: TelegramChannelBindings
 			}
 			if (!query.message) return;
 
-			const conversationId = channel.conversationKey(conversationFromMessage(query.message));
+			const ref = conversationFromMessage(query.message);
+			const conversationId = channel.conversationKey(ref);
+			const uxAction = parseUxCallback(query.data);
+			if (uxAction) {
+				await handleUxCallback(c.env, ref, conversationId, uxAction);
+				console.log('[telegram:webhook] ux callback handled', {
+					updateId: update.update_id,
+					chatId: query.message.chat.id,
+					conversationId,
+					action: uxAction,
+				});
+				return;
+			}
+
 			const state = await getConversationState(c.env, conversationId);
 			const agentId = buildTelegramAgentId(conversationId, state);
 			const receipt = await dispatch(teacher, {
@@ -147,6 +160,34 @@ interface TelegramStateDocument extends TelegramAgentState {
 	updatedAt: string;
 }
 
+type UxCallbackAction =
+	| 'ux:menu'
+	| 'ux:model'
+	| 'ux:model:zai'
+	| 'ux:model:codex'
+	| 'ux:pages'
+	| 'ux:examples'
+	| 'ux:new:ask'
+	| 'ux:new:confirm'
+	| 'ux:new:cancel';
+
+interface TelegramTextResponse {
+	text: string;
+	replyMarkup?: InlineKeyboardMarkup;
+}
+
+const UX_CALLBACK_ACTIONS = new Set<string>([
+	'ux:menu',
+	'ux:model',
+	'ux:model:zai',
+	'ux:model:codex',
+	'ux:pages',
+	'ux:examples',
+	'ux:new:ask',
+	'ux:new:confirm',
+	'ux:new:cancel',
+]);
+
 async function handleCommand(
 	env: TelegramChannelBindings,
 	ref: TelegramConversationRef,
@@ -160,23 +201,28 @@ async function handleCommand(
 	}
 
 	if (command.name === 'start' || command.name === 'help') {
-		await sendText(ref, helpText(await getConversationState(env, conversationId)));
+		await sendText(ref, commandCenterText(await getConversationState(env, conversationId)), {
+			replyMarkup: commandCenterKeyboard(),
+		});
 		return;
 	}
 
 	if (command.name === 'session') {
-		await sendText(ref, sessionText(await getConversationState(env, conversationId)));
+		await sendText(ref, sessionText(await getConversationState(env, conversationId)), {
+			replyMarkup: commandCenterKeyboard(),
+		});
 		return;
 	}
 
 	if (command.name === 'pages') {
 		const state = await getConversationState(env, conversationId);
 		try {
-			await sendText(ref, await pagesText(env, conversationId, state, command.args));
+			await sendResponse(ref, await pagesResponse(env, conversationId, state, command.args));
 		} catch (error) {
 			await sendText(
 				ref,
 				`Unable to resolve page reference: ${error instanceof Error ? error.message : String(error)}`,
+				{ replyMarkup: commandCenterKeyboard() },
 			);
 		}
 		return;
@@ -185,7 +231,9 @@ async function handleCommand(
 	if (command.name === 'new') {
 		const model = command.args ? telegramModelFromAlias(command.args) : undefined;
 		if (command.args && !model) {
-			await sendText(ref, unknownModelText(command.args));
+			await sendText(ref, unknownModelText(command.args), {
+				replyMarkup: modelKeyboard(await getConversationState(env, conversationId)),
+			});
 			return;
 		}
 
@@ -193,41 +241,107 @@ async function handleCommand(
 			newSession: true,
 			...(model ? { modelKey: model.key } : {}),
 		});
-		await sendText(
-			ref,
-			`Started a new session: ${state.sessionId}\nModel: ${TELEGRAM_MODEL_OPTIONS[state.modelKey].label}`,
-		);
+		await sendText(ref, newSessionStartedText(state), { replyMarkup: commandCenterKeyboard() });
 		return;
 	}
 
 	if (command.name === 'model') {
 		if (!command.args) {
-			await sendText(ref, modelText(await getConversationState(env, conversationId)));
+			const state = await getConversationState(env, conversationId);
+			await sendText(ref, modelText(state), { replyMarkup: modelKeyboard(state) });
 			return;
 		}
 
 		const model = telegramModelFromAlias(command.args);
 		if (!model) {
-			await sendText(ref, unknownModelText(command.args));
+			await sendText(ref, unknownModelText(command.args), {
+				replyMarkup: modelKeyboard(await getConversationState(env, conversationId)),
+			});
 			return;
 		}
 
 		const state = await updateConversationState(env, conversationId, { modelKey: model.key });
-		await sendText(
-			ref,
-			[
-				`Model switched to ${model.label}.`,
-				`Session: ${state.sessionId}`,
-				model.note ? `Note: ${model.note}` : undefined,
-				'Use /new to start a clean session on this model.',
-			]
-				.filter(Boolean)
-				.join('\n'),
-		);
+		await sendText(ref, modelSwitchedText(state, model.key, false), {
+			replyMarkup: modelKeyboard(state),
+		});
 		return;
 	}
 
-	await sendText(ref, `Unknown command: /${command.name}\n\n${helpText(await getConversationState(env, conversationId))}`);
+	await sendText(
+		ref,
+		`Unknown command: /${command.name}\n\n${commandCenterText(await getConversationState(env, conversationId))}`,
+		{ replyMarkup: commandCenterKeyboard() },
+	);
+}
+
+async function handleUxCallback(
+	env: TelegramChannelBindings,
+	ref: TelegramConversationRef,
+	conversationId: string,
+	action: UxCallbackAction,
+): Promise<void> {
+	if (action === 'ux:menu') {
+		await sendText(ref, commandCenterText(await getConversationState(env, conversationId)), {
+			replyMarkup: commandCenterKeyboard(),
+		});
+		return;
+	}
+
+	if (action === 'ux:model') {
+		const state = await getConversationState(env, conversationId);
+		await sendText(ref, modelText(state), { replyMarkup: modelKeyboard(state) });
+		return;
+	}
+
+	if (action === 'ux:model:zai' || action === 'ux:model:codex') {
+		const modelKey = action === 'ux:model:zai' ? 'zai' : 'codex';
+		const current = await getConversationState(env, conversationId);
+		const alreadySelected = current.modelKey === modelKey;
+		const state = alreadySelected
+			? current
+			: await updateConversationState(env, conversationId, { modelKey });
+		await sendText(ref, modelSwitchedText(state, modelKey, alreadySelected), {
+			replyMarkup: modelKeyboard(state),
+		});
+		return;
+	}
+
+	if (action === 'ux:pages') {
+		const state = await getConversationState(env, conversationId);
+		try {
+			await sendResponse(ref, await pagesResponse(env, conversationId, state));
+		} catch (error) {
+			await sendText(
+				ref,
+				`Unable to load pages: ${error instanceof Error ? error.message : String(error)}`,
+				{ replyMarkup: commandCenterKeyboard() },
+			);
+		}
+		return;
+	}
+
+	if (action === 'ux:examples') {
+		await sendText(ref, examplesText(), { replyMarkup: examplesKeyboard() });
+		return;
+	}
+
+	if (action === 'ux:new:ask') {
+		await sendText(ref, newSessionConfirmText(await getConversationState(env, conversationId)), {
+			replyMarkup: newSessionConfirmKeyboard(),
+		});
+		return;
+	}
+
+	if (action === 'ux:new:confirm') {
+		const state = await updateConversationState(env, conversationId, { newSession: true });
+		await sendText(ref, newSessionStartedText(state), { replyMarkup: commandCenterKeyboard() });
+		return;
+	}
+
+	const state = await getConversationState(env, conversationId);
+	await sendText(ref, `New session cancelled.\n\n${sessionText(state)}`, {
+		replyMarkup: commandCenterKeyboard(),
+	});
 }
 
 export function postMessage(ref: TelegramConversationRef) {
@@ -324,14 +438,26 @@ function stateRequest(conversationId: string, init?: RequestInit): Request {
 	);
 }
 
-async function sendText(ref: TelegramConversationRef, text: string): Promise<void> {
-	await sendTextChunks(ref, text);
+async function sendResponse(ref: TelegramConversationRef, response: TelegramTextResponse): Promise<void> {
+	await sendText(ref, response.text, { replyMarkup: response.replyMarkup });
 }
 
-async function sendTextChunks(ref: TelegramConversationRef, text: string): Promise<Message.TextMessage[]> {
+async function sendText(
+	ref: TelegramConversationRef,
+	text: string,
+	options: { replyMarkup?: InlineKeyboardMarkup } = {},
+): Promise<void> {
+	await sendTextChunks(ref, text, options);
+}
+
+async function sendTextChunks(
+	ref: TelegramConversationRef,
+	text: string,
+	options: { replyMarkup?: InlineKeyboardMarkup } = {},
+): Promise<Message.TextMessage[]> {
 	const chunks = splitTelegramText(text);
 	const messages: Message.TextMessage[] = [];
-	for (const chunk of chunks) {
+	for (const [index, chunk] of chunks.entries()) {
 		messages.push(
 			await client.sendMessage(ref.chatId, chunk, {
 				...(ref.type === 'business-chat'
@@ -339,6 +465,9 @@ async function sendTextChunks(ref: TelegramConversationRef, text: string): Promi
 					: {}),
 				...(ref.messageThreadId ? { message_thread_id: ref.messageThreadId } : {}),
 				...(ref.directMessagesTopicId ? { direct_messages_topic_id: ref.directMessagesTopicId } : {}),
+				...(index === chunks.length - 1 && options.replyMarkup
+					? { reply_markup: options.replyMarkup }
+					: {}),
 			}),
 		);
 	}
@@ -473,6 +602,13 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function parseUxCallback(data: string | undefined): UxCallbackAction | undefined {
+	if (!data || !UX_CALLBACK_ACTIONS.has(data)) {
+		return undefined;
+	}
+	return data as UxCallbackAction;
+}
+
 function parseCommand(text: string): BotCommand | undefined {
 	const trimmed = text.trim();
 	if (!trimmed.startsWith('/')) {
@@ -491,41 +627,36 @@ function parseCommand(text: string): BotCommand | undefined {
 	};
 }
 
-function helpText(state: TelegramAgentState): string {
+function commandCenterText(state: TelegramAgentState): string {
 	return [
-		'Teacher bot commands:',
-		'/model - show current model',
-		'/model zai - switch to ZAI GLM-5.2 Max',
-		'/model codex - switch to Codex GPT-5.5',
-		'/new - start a clean session',
-		'/new zai - start a clean session on ZAI',
-		'/session - show current session',
-		'/pages - show hosted lesson pages for this session',
-		'/pages <url|share-id|session-id> - show a referenced page index',
-		'/whoami - show your Telegram user id',
+		'Teacher bot',
+		`Model: ${TELEGRAM_MODEL_OPTIONS[state.modelKey].label}`,
+		`Session: ${state.sessionId}`,
 		'',
-		`Current: ${TELEGRAM_MODEL_OPTIONS[state.modelKey].label}, session ${state.sessionId}`,
+		'Send a topic or question directly, or use the buttons below.',
+		'Commands: /model, /new, /pages, /session, /whoami',
 	].join('\n');
 }
 
 function sessionText(state: TelegramAgentState): string {
 	return [
+		'Current session',
 		`Session: ${state.sessionId}`,
 		`Model: ${TELEGRAM_MODEL_OPTIONS[state.modelKey].label}`,
-		'Use /new to start fresh.',
+		'Use /new to start fresh, or tap New session.',
 	].join('\n');
 }
 
 function modelText(state: TelegramAgentState): string {
 	const model = TELEGRAM_MODEL_OPTIONS[state.modelKey];
 	return [
-		`Current model: ${model.label}`,
-		`Current session: ${state.sessionId}`,
+		'Model picker',
+		`Current: ${model.label}`,
+		`Session: ${state.sessionId}`,
 		'',
-		'Available models:',
 		describeTelegramModels(),
 		'',
-		'Switch with /model zai or /model codex.',
+		'Tap a model, or use /model zai or /model codex.',
 		model.note ? `Note: ${model.note}` : undefined,
 	]
 		.filter(Boolean)
@@ -536,11 +667,117 @@ function unknownModelText(input: string): string {
 	return [
 		`Unknown model: ${input}`,
 		'',
-		'Available models:',
 		describeTelegramModels(),
 		'',
-		'Use /model zai or /model codex.',
+		'Tap a model, or use /model zai or /model codex.',
 	].join('\n');
+}
+
+function modelSwitchedText(
+	state: TelegramAgentState,
+	modelKey: TelegramModelKey,
+	alreadySelected: boolean,
+): string {
+	const model = TELEGRAM_MODEL_OPTIONS[modelKey];
+	return [
+		alreadySelected ? `Already using ${model.label}.` : `Model switched to ${model.label}.`,
+		`Session: ${state.sessionId}`,
+		model.note ? `Note: ${model.note}` : undefined,
+		'Use /new to start a clean session on this model.',
+	]
+		.filter(Boolean)
+		.join('\n');
+}
+
+function newSessionConfirmText(state: TelegramAgentState): string {
+	return [
+		'Start a new session?',
+		`Current session: ${state.sessionId}`,
+		`Model: ${TELEGRAM_MODEL_OPTIONS[state.modelKey].label}`,
+		'',
+		'This keeps old history stored but stops using it for new messages.',
+	].join('\n');
+}
+
+function newSessionStartedText(state: TelegramAgentState): string {
+	return [
+		'Started a new session.',
+		`Session: ${state.sessionId}`,
+		`Model: ${TELEGRAM_MODEL_OPTIONS[state.modelKey].label}`,
+		'Send a topic when ready.',
+	].join('\n');
+}
+
+function examplesText(): string {
+	return [
+		'Prompt starters',
+		'Teach me TypeScript generics in 10 minutes.',
+		'Quiz me on the latest lesson page.',
+		'Make a practice exercise with hints.',
+		'Explain this code step by step: <paste code>',
+		'Create a short lesson page about <topic>.',
+	].join('\n');
+}
+
+function commandCenterKeyboard(): InlineKeyboardMarkup {
+	return inlineKeyboard([
+		[
+			callbackButton('New session', 'ux:new:ask'),
+			callbackButton('Model', 'ux:model'),
+		],
+		[
+			callbackButton('Pages', 'ux:pages'),
+			callbackButton('Examples', 'ux:examples'),
+		],
+	]);
+}
+
+function modelKeyboard(state: TelegramAgentState): InlineKeyboardMarkup {
+	return inlineKeyboard([
+		[
+			callbackButton(modelButtonText('zai', state.modelKey), 'ux:model:zai'),
+			callbackButton(modelButtonText('codex', state.modelKey), 'ux:model:codex'),
+		],
+		[callbackButton('Menu', 'ux:menu')],
+	]);
+}
+
+function pagesKeyboard(indexUrl: string, referencedPageUrl?: string): InlineKeyboardMarkup {
+	return inlineKeyboard([
+		[urlButton('Open page index', indexUrl)],
+		...(referencedPageUrl ? [[urlButton('Open referenced page', referencedPageUrl)]] : []),
+		[callbackButton('Menu', 'ux:menu')],
+	]);
+}
+
+function examplesKeyboard(): InlineKeyboardMarkup {
+	return inlineKeyboard([[callbackButton('Menu', 'ux:menu')]]);
+}
+
+function newSessionConfirmKeyboard(): InlineKeyboardMarkup {
+	return inlineKeyboard([
+		[
+			callbackButton('Start new session', 'ux:new:confirm'),
+			callbackButton('Cancel', 'ux:new:cancel'),
+		],
+	]);
+}
+
+function modelButtonText(modelKey: TelegramModelKey, currentModelKey: TelegramModelKey): string {
+	const label = modelKey === 'zai' ? 'ZAI' : 'Codex';
+	return modelKey === currentModelKey ? `${label} [current]` : label;
+}
+
+function inlineKeyboard(rows: InlineKeyboardMarkup['inline_keyboard']): InlineKeyboardMarkup {
+	return { inline_keyboard: rows };
+}
+
+function callbackButton(text: string, callbackData: UxCallbackAction): { text: string; callback_data: string } {
+	return { text, callback_data: callbackData };
+}
+
+function urlButton(text: string, url: string): { text: string; url: string } {
+	return { text, url };
 }
 
 function whoamiText(senderId: number | undefined): string {
@@ -564,43 +801,54 @@ function telegramAllowedUserIds(env: TelegramChannelBindings): Set<string> | und
 	return ids?.length ? new Set(ids) : undefined;
 }
 
-async function pagesText(
+async function pagesResponse(
 	env: TelegramChannelBindings,
 	conversationId: string,
 	state: TelegramAgentState,
 	reference?: string,
-): Promise<string> {
+): Promise<TelegramTextResponse> {
 	const agentId = buildTelegramAgentId(conversationId, state);
 	if (reference?.trim()) {
 		const resolved = await resolveTeachingPageReference({
 			reference,
 			currentAgentId: agentId,
 		});
-		return referencedPagesText(env, resolved);
+		return referencedPagesResponse(env, resolved);
 	}
 
 	const shareId = await shareIdForAgentId(agentId);
-	return [
-		`Hosted pages for session ${state.sessionId}:`,
-		teachingPageIndexUrl(env, shareId),
-		'',
-		'Ask for a lesson first if the index is empty.',
-	].join('\n');
+	const indexUrl = teachingPageIndexUrl(env, shareId);
+	return {
+		text: [
+			`Hosted pages for session ${state.sessionId}:`,
+			indexUrl,
+			'',
+			'Ask for a lesson first if the index is empty.',
+		].join('\n'),
+		replyMarkup: pagesKeyboard(indexUrl),
+	};
 }
 
-function referencedPagesText(
+function referencedPagesResponse(
 	env: TelegramChannelBindings,
 	resolved: ResolvedTeachingPageReference,
-): string {
-	return [
-		`Hosted pages for ${referencedPagesLabel(resolved)}:`,
-		teachingPageIndexUrl(env, resolved.shareId),
-		resolved.path ? `Referenced page: ${teachingPageUrl(env, resolved.shareId, resolved.path)}` : undefined,
-		'',
-		'Paste the page URL in a normal message when you want the agent to use it.',
-	]
-		.filter((line): line is string => line !== undefined)
-		.join('\n');
+): TelegramTextResponse {
+	const indexUrl = teachingPageIndexUrl(env, resolved.shareId);
+	const referencedPageUrl = resolved.path
+		? teachingPageUrl(env, resolved.shareId, resolved.path)
+		: undefined;
+	return {
+		text: [
+			`Hosted pages for ${referencedPagesLabel(resolved)}:`,
+			indexUrl,
+			referencedPageUrl ? `Referenced page: ${referencedPageUrl}` : undefined,
+			'',
+			'Paste the page URL in a normal message when you want the agent to use it.',
+		]
+			.filter((line): line is string => line !== undefined)
+			.join('\n'),
+		replyMarkup: pagesKeyboard(indexUrl, referencedPageUrl),
+	};
 }
 
 function referencedPagesLabel(resolved: ResolvedTeachingPageReference): string {
