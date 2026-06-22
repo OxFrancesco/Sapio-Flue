@@ -1,0 +1,49 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "sapio-flue-teacher",
+  "compatibility_date": "2026-06-20",
+  "compatibility_flags": ["nodejs_compat"],
+  "migrations": [
+    {
+      "tag": "flue-class-FlueRegistry",
+      "new_sqlite_classes": ["FlueRegistry"]
+    },
+    {
+      "tag": "flue-class-FlueTeacherAgent",
+      "new_sqlite_classes": ["FlueTeacherAgent"]
+    },
+    {
+      "tag": "codex-auth-vault-v1",
+      "new_sqlite_classes": ["CodexAuthVault"]
+    },
+    {
+      "tag": "telegram-bot-state-v1",
+      "new_sqlite_classes": ["TelegramBotState"]
+    },
+    {
+      "tag": "lesson-page-store-v1",
+      "new_sqlite_classes": ["LessonPageStore"]
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CODEX_AUTH_VAULT",
+        "class_name": "CodexAuthVault"
+      },
+      {
+        "name": "TELEGRAM_BOT_STATE",
+        "class_name": "TelegramBotState"
+      },
+      {
+        "name": "LESSON_PAGE_STORE",
+        "class_name": "LessonPageStore"
+      }
+    ]
+  },
+  "vars": {
+    "MODEL_SPECIFIER": "zai/glm-5.2",
+    "WORKOS_VAULT_OBJECT_NAME": "sapio-flue-openai-codex-auth",
+    "PUBLIC_BASE_URL": "https://sapio-flue-teacher.oddofrancesco000.workers.dev"
+  }
+}

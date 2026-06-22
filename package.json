@@ -1,0 +1,37 @@
+{
+  "name": "sapio-flue",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "build": "flue build --target cloudflare",
+    "dev": "flue dev --target cloudflare",
+    "typecheck": "tsc --noEmit",
+    "deploy:dry-run": "npm run build && wrangler deploy --dry-run --config dist/sapio_flue_teacher/wrangler.json",
+    "deploy": "npm run build && wrangler deploy --config dist/sapio_flue_teacher/wrangler.json"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@cloudflare/codemode": "^0.3.8",
+    "@cloudflare/shell": "^0.3.9",
+    "@earendil-works/pi-ai": "^0.79.8",
+    "@flue/runtime": "^1.0.0-beta.2",
+    "@flue/telegram": "^1.0.0-beta.1",
+    "@workos-inc/node": "^10.4.0",
+    "agents": "^0.14.5",
+    "grammy": "^1.44.0",
+    "hono": "^4.12.26"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260620.1",
+    "@flue/cli": "^1.0.0-beta.1",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.103.0"
+  },
+  "overrides": {
+    "hono": "$hono"
+  }
+}
