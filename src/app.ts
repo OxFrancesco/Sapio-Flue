@@ -13,6 +13,8 @@ import {
 interface Env extends TeachingPageBindingEnv {
 	CODEX_AUTH_VAULT?: DurableObjectNamespace;
 	CODEX_AUTH_ADMIN_TOKEN?: string;
+	TELEGRAM_BOT_TOKEN?: string;
+	TELEGRAM_COMMANDS_ADMIN_TOKEN?: string;
 }
 
 const app = new Hono<{ Bindings: Env }>();
@@ -73,6 +75,49 @@ app.get('/teach', (c) =>
 	),
 );
 app.get('/teach/*', serveTeachingPage);
+
+app.post('/admin/telegram/register-commands', async (c) => {
+	const auth = telegramAdminAuth(c);
+	if (auth) {
+		return auth;
+	}
+	if (!c.env.TELEGRAM_BOT_TOKEN) {
+		return c.json({ error: 'TELEGRAM_BOT_TOKEN is not configured.' }, 503);
+	}
+
+	const response = await fetch(`https://api.telegram.org/bot${c.env.TELEGRAM_BOT_TOKEN}/setMyCommands`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			scope: { type: 'default' },
+			commands: telegramBotCommands(),
+		}),
+	});
+	const result = (await response.json().catch(() => ({ ok: false }))) as unknown;
+	if (!response.ok) {
+		return jsonResponse({ error: 'Telegram command registration failed.', result }, { status: response.status });
+	}
+
+	return c.json({ ok: true, result });
+});
+
+app.get('/admin/telegram/commands', async (c) => {
+	const auth = telegramAdminAuth(c);
+	if (auth) {
+		return auth;
+	}
+	if (!c.env.TELEGRAM_BOT_TOKEN) {
+		return c.json({ error: 'TELEGRAM_BOT_TOKEN is not configured.' }, 503);
+	}
+
+	const response = await fetch(`https://api.telegram.org/bot${c.env.TELEGRAM_BOT_TOKEN}/getMyCommands`);
+	const result = (await response.json().catch(() => ({ ok: false }))) as unknown;
+	if (!response.ok) {
+		return jsonResponse({ error: 'Telegram command lookup failed.', result }, { status: response.status });
+	}
+
+	return c.json({ ok: true, result });
+});
 
 app.use('/admin/codex-auth/*', async (c, next) => {
 	if (c.req.path.endsWith('/device/complete')) {
@@ -219,6 +264,40 @@ function getCodexAuthVault(env: Env): DurableObjectStub {
 	return env.CODEX_AUTH_VAULT.getByName('default');
 }
 
+function telegramAdminAuth(c: {
+	env: Env;
+	req: { header(name: string): string | undefined; query(name: string): string | undefined };
+}): Response | undefined {
+	const accepted = [c.env.TELEGRAM_COMMANDS_ADMIN_TOKEN, c.env.CODEX_AUTH_ADMIN_TOKEN].filter(
+		(value): value is string => Boolean(value),
+	);
+	if (accepted.length === 0) {
+		return new Response(JSON.stringify({ error: 'Telegram command admin token is not configured.' }), {
+			status: 503,
+			headers: { 'content-type': 'application/json; charset=utf-8' },
+		});
+	}
+
+	if (!accepted.includes(adminToken(c))) {
+		return new Response(JSON.stringify({ error: 'Unauthorized.' }), {
+			status: 401,
+			headers: { 'content-type': 'application/json; charset=utf-8' },
+		});
+	}
+	return undefined;
+}
+
+function telegramBotCommands(): Array<{ command: string; description: string }> {
+	return [
+		{ command: 'start', description: 'Start the teacher bot' },
+		{ command: 'help', description: 'Show bot commands' },
+		{ command: 'model', description: 'Show or switch the model' },
+		{ command: 'new', description: 'Start a clean session' },
+		{ command: 'session', description: 'Show the current session' },
+		{ command: 'pages', description: 'Show hosted lesson pages' },
+	];
+}
+
 async function serveTeachingPage(c: { req: { url: string }; env: Env }): Promise<Response> {
 	const parsed = parseTeachingPageUrl(new URL(c.req.url).pathname);
 	if (!parsed) {
@@ -354,6 +433,12 @@ function htmlResponse(html: string, init?: ResponseInit): Response {
 	const headers = new Headers(init?.headers);
 	headers.set('content-type', 'text/html; charset=utf-8');
 	return new Response(html, { ...init, headers });
+}
+
+function jsonResponse(value: unknown, init?: ResponseInit): Response {
+	const headers = new Headers(init?.headers);
+	headers.set('content-type', 'application/json; charset=utf-8');
+	return new Response(JSON.stringify(value), { ...init, headers });
 }
 
 async function errorPage(title: string, detail: string): Promise<string> {

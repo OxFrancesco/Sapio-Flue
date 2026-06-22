@@ -147,6 +147,20 @@ Bot commands:
 
 The bot stores the selected model and current session id per Telegram chat/topic in the `TelegramBotState` Durable Object. A new session is implemented as a new Flue agent instance id, so old session history remains durable but stops being used.
 
+Register the Telegram menu commands after deploying:
+
+```bash
+curl -X POST "${WORKER_URL}/admin/telegram/register-commands" \
+  -H "Authorization: Bearer ${CODEX_AUTH_ADMIN_TOKEN}"
+```
+
+Verify the registered menu:
+
+```bash
+curl "${WORKER_URL}/admin/telegram/commands" \
+  -H "Authorization: Bearer ${CODEX_AUTH_ADMIN_TOKEN}"
+```
+
 When the teach skill creates or updates HTML, the agent can call `publish_teaching_page`. Published pages are stored in the `LessonPageStore` Durable Object and served by the Worker:
 
 ```txt
