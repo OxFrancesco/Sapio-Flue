@@ -15,6 +15,7 @@ interface Env extends TeachingPageBindingEnv {
 	CODEX_AUTH_ADMIN_TOKEN?: string;
 	TELEGRAM_BOT_TOKEN?: string;
 	TELEGRAM_COMMANDS_ADMIN_TOKEN?: string;
+	TELEGRAM_ALLOWED_USER_IDS?: string;
 }
 
 const app = new Hono<{ Bindings: Env }>();
@@ -295,6 +296,7 @@ function telegramBotCommands(): Array<{ command: string; description: string }> 
 		{ command: 'new', description: 'Start a clean session' },
 		{ command: 'session', description: 'Show the current session' },
 		{ command: 'pages', description: 'Show hosted lesson pages' },
+		{ command: 'whoami', description: 'Show your Telegram user id' },
 	];
 }
 

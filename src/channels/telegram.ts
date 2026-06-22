@@ -20,6 +20,7 @@ import {
 
 interface TelegramChannelBindings extends TeachingPageBindingEnv {
 	TELEGRAM_BOT_STATE?: DurableObjectNamespace;
+	TELEGRAM_ALLOWED_USER_IDS?: string;
 }
 
 export type TelegramTeacherInput =
@@ -54,9 +55,19 @@ export const channel = createTelegramChannel<{ Bindings: TelegramChannelBindings
 		if (incoming) {
 			const ref = conversationFromMessage(incoming);
 			const conversationId = channel.conversationKey(ref);
+			const senderId = incoming.from?.id;
+			if (!isTelegramSenderAllowed(c.env, senderId)) {
+				console.warn('[telegram:auth] ignored unauthorized message', {
+					updateId: update.update_id,
+					chatId: incoming.chat.id,
+					senderId,
+				});
+				return;
+			}
+
 			const command = parseCommand(messageText(incoming));
 			if (command) {
-				await handleCommand(c.env, ref, conversationId, command);
+				await handleCommand(c.env, ref, conversationId, command, senderId);
 				return;
 			}
 
@@ -90,6 +101,13 @@ export const channel = createTelegramChannel<{ Bindings: TelegramChannelBindings
 		if (update.callback_query) {
 			const query = update.callback_query;
 			await client.answerCallbackQuery(query.id);
+			if (!isTelegramSenderAllowed(c.env, query.from.id)) {
+				console.warn('[telegram:auth] ignored unauthorized callback', {
+					updateId: update.update_id,
+					senderId: query.from.id,
+				});
+				return;
+			}
 			if (!query.message) return;
 
 			const conversationId = channel.conversationKey(conversationFromMessage(query.message));
@@ -131,7 +149,13 @@ async function handleCommand(
 	ref: TelegramConversationRef,
 	conversationId: string,
 	command: BotCommand,
+	senderId: number | undefined,
 ): Promise<void> {
+	if (command.name === 'whoami') {
+		await sendText(ref, whoamiText(senderId));
+		return;
+	}
+
 	if (command.name === 'start' || command.name === 'help') {
 		await sendText(ref, helpText(await getConversationState(env, conversationId)));
 		return;
@@ -466,6 +490,7 @@ function helpText(state: TelegramAgentState): string {
 		'/new zai - start a clean session on ZAI',
 		'/session - show current session',
 		'/pages - show hosted lesson pages for this session',
+		'/whoami - show your Telegram user id',
 		'',
 		`Current: ${TELEGRAM_MODEL_OPTIONS[state.modelKey].label}, session ${state.sessionId}`,
 	].join('\n');
@@ -504,6 +529,27 @@ function unknownModelText(input: string): string {
 		'',
 		'Use /model zai or /model codex.',
 	].join('\n');
+}
+
+function whoamiText(senderId: number | undefined): string {
+	return senderId === undefined
+		? 'Telegram did not include a user id for this message.'
+		: `Your Telegram user id is ${senderId}.\nSet TELEGRAM_ALLOWED_USER_IDS to this value to make the bot answer only to you.`;
+}
+
+function isTelegramSenderAllowed(env: TelegramChannelBindings, senderId: number | undefined): boolean {
+	const allowed = telegramAllowedUserIds(env);
+	if (!allowed) {
+		return true;
+	}
+	return senderId !== undefined && allowed.has(String(senderId));
+}
+
+function telegramAllowedUserIds(env: TelegramChannelBindings): Set<string> | undefined {
+	const ids = env.TELEGRAM_ALLOWED_USER_IDS?.split(',')
+		.map((id) => id.trim())
+		.filter(Boolean);
+	return ids?.length ? new Set(ids) : undefined;
 }
 
 async function pagesText(

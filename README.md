@@ -30,6 +30,7 @@ npx wrangler secret put WORKOS_API_KEY
 npx wrangler secret put CODEX_AUTH_ADMIN_TOKEN
 npx wrangler secret put TELEGRAM_BOT_TOKEN
 npx wrangler secret put TELEGRAM_WEBHOOK_SECRET_TOKEN
+npx wrangler secret put TELEGRAM_ALLOWED_USER_IDS
 npx wrangler secret put ZAI_API_KEY
 ```
 
@@ -42,6 +43,7 @@ WORKOS_API_KEY="sk_..."
 CODEX_AUTH_ADMIN_TOKEN="local-admin-token"
 TELEGRAM_BOT_TOKEN="123456:telegram-bot-token"
 TELEGRAM_WEBHOOK_SECRET_TOKEN="letters_numbers_underscores_or_hyphens"
+TELEGRAM_ALLOWED_USER_IDS="123456789"
 ZAI_API_KEY="zai-api-key"
 ```
 
@@ -142,10 +144,19 @@ Bot commands:
 /new zai      Start a clean session on ZAI GLM-5.2 Max.
 /session      Show the current session id and model.
 /pages        Show the Cloudflare-hosted lesson index for this session.
+/whoami       Show your Telegram user id.
 /help         Show command help.
 ```
 
 The bot stores the selected model and current session id per Telegram chat/topic in the `TelegramBotState` Durable Object. A new session is implemented as a new Flue agent instance id, so old session history remains durable but stops being used.
+
+To make the bot answer only to you, leave `TELEGRAM_ALLOWED_USER_IDS` unset at first, message `/whoami` to the bot, then set the returned numeric user id as a Worker secret:
+
+```bash
+printf "123456789" | npx wrangler secret put TELEGRAM_ALLOWED_USER_IDS --name sapio-flue-teacher
+```
+
+Multiple users can be allowlisted with a comma-separated value. When the secret is set, messages and callbacks from all other Telegram users are ignored before command handling, draft streaming, or agent dispatch.
 
 For one-to-one chats, non-command prompts use Telegram message drafts: the bot immediately shows a native "Thinking..." draft, then previews the generated reply through draft updates before sending the final persistent message. Group, topic, direct-message, and business contexts fall back to Telegram's typing action when drafts are not supported.
 
