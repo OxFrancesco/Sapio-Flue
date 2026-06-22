@@ -3,6 +3,7 @@ import { flue } from '@flue/runtime/routing';
 import { Hono } from 'hono';
 import {
 	normalizeTeachingPagePath,
+	parseTeachingPagePathname,
 	teachingPageIndexUrl,
 	teachingPageStore,
 	teachingPageUrl,
@@ -295,13 +296,13 @@ function telegramBotCommands(): Array<{ command: string; description: string }> 
 		{ command: 'model', description: 'Show or switch the model' },
 		{ command: 'new', description: 'Start a clean session' },
 		{ command: 'session', description: 'Show the current session' },
-		{ command: 'pages', description: 'Show hosted lesson pages' },
+		{ command: 'pages', description: 'Show hosted or referenced lesson pages' },
 		{ command: 'whoami', description: 'Show your Telegram user id' },
 	];
 }
 
 async function serveTeachingPage(c: { req: { url: string }; env: Env }): Promise<Response> {
-	const parsed = parseTeachingPageUrl(new URL(c.req.url).pathname);
+	const parsed = parseTeachingPagePathname(new URL(c.req.url).pathname);
 	if (!parsed) {
 		return htmlResponse(await errorPage('Teaching page not found', 'The teaching page URL is invalid.'), {
 			status: 404,
@@ -352,26 +353,6 @@ async function serveTeachingPage(c: { req: { url: string }; env: Env }): Promise
 	return new Response(page.body, { headers });
 }
 
-function parseTeachingPageUrl(pathname: string): { shareId: string; path: string } | undefined {
-	const prefix = '/teach/';
-	if (!pathname.startsWith(prefix)) {
-		return undefined;
-	}
-
-	const remainder = pathname.slice(prefix.length);
-	const slashIndex = remainder.indexOf('/');
-	const encodedShareId = slashIndex === -1 ? remainder : remainder.slice(0, slashIndex);
-	const rawPath = slashIndex === -1 ? '' : remainder.slice(slashIndex + 1);
-	const shareId = decodePathPart(encodedShareId);
-	if (!shareId || !/^[a-f0-9]{32}$/i.test(shareId)) {
-		return undefined;
-	}
-	return {
-		shareId: shareId.toLowerCase(),
-		path: rawPath ? decodePath(rawPath) : '',
-	};
-}
-
 function renderTeachingPageIndex(
 	env: Env,
 	shareId: string,
@@ -407,20 +388,8 @@ function renderTeachingPageIndex(
 			? `<ul>${items}</ul>`
 			: '<p>No teaching pages have been published for this session yet.</p>'
 	}
-</body>
-</html>`;
-}
-
-function decodePath(value: string): string {
-	return value.split('/').map(decodePathPart).join('/');
-}
-
-function decodePathPart(value: string): string {
-	try {
-		return decodeURIComponent(value);
-	} catch {
-		return '';
-	}
+	</body>
+	</html>`;
 }
 
 function adminToken(c: { req: { header(name: string): string | undefined; query(name: string): string | undefined } }): string {

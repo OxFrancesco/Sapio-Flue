@@ -144,6 +144,8 @@ Bot commands:
 /new zai      Start a clean session on ZAI GLM-5.2 Max.
 /session      Show the current session id and model.
 /pages        Show the Cloudflare-hosted lesson index for this session.
+/pages <url|share-id|session-id>
+              Show the Cloudflare-hosted lesson index for a referenced session.
 /whoami       Show your Telegram user id.
 /help         Show command help.
 ```
@@ -182,6 +184,8 @@ https://sapio-flue-teacher.<your-subdomain>.workers.dev/teach/<session-share-id>
 ```
 
 Use `/pages` in Telegram to get the index URL for the current chat/session. Starting a new session with `/new` creates a new page index.
+
+The teacher agent can automatically list pages it published in the current session. To let it use pages from another session, reference a hosted `/teach/<share-id>` URL, a 32-character share id, or a same-conversation session id in your message. The agent has a dedicated `inspect_teaching_page_reference` tool for those explicit references, and it is instructed not to search unrelated sessions without one.
 
 Deploy with the generated Wrangler config:
 

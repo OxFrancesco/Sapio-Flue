@@ -13,8 +13,11 @@ import {
 	type TelegramModelKey,
 } from '../models';
 import {
+	resolveTeachingPageReference,
+	type ResolvedTeachingPageReference,
 	shareIdForAgentId,
 	teachingPageIndexUrl,
+	teachingPageUrl,
 	type TeachingPageBindingEnv,
 } from '../teaching-pages';
 
@@ -167,7 +170,15 @@ async function handleCommand(
 	}
 
 	if (command.name === 'pages') {
-		await sendText(ref, await pagesText(env, conversationId, await getConversationState(env, conversationId)));
+		const state = await getConversationState(env, conversationId);
+		try {
+			await sendText(ref, await pagesText(env, conversationId, state, command.args));
+		} catch (error) {
+			await sendText(
+				ref,
+				`Unable to resolve page reference: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 		return;
 	}
 
@@ -490,6 +501,7 @@ function helpText(state: TelegramAgentState): string {
 		'/new zai - start a clean session on ZAI',
 		'/session - show current session',
 		'/pages - show hosted lesson pages for this session',
+		'/pages <url|share-id|session-id> - show a referenced page index',
 		'/whoami - show your Telegram user id',
 		'',
 		`Current: ${TELEGRAM_MODEL_OPTIONS[state.modelKey].label}, session ${state.sessionId}`,
@@ -556,8 +568,17 @@ async function pagesText(
 	env: TelegramChannelBindings,
 	conversationId: string,
 	state: TelegramAgentState,
+	reference?: string,
 ): Promise<string> {
 	const agentId = buildTelegramAgentId(conversationId, state);
+	if (reference?.trim()) {
+		const resolved = await resolveTeachingPageReference({
+			reference,
+			currentAgentId: agentId,
+		});
+		return referencedPagesText(env, resolved);
+	}
+
 	const shareId = await shareIdForAgentId(agentId);
 	return [
 		`Hosted pages for session ${state.sessionId}:`,
@@ -565,6 +586,31 @@ async function pagesText(
 		'',
 		'Ask for a lesson first if the index is empty.',
 	].join('\n');
+}
+
+function referencedPagesText(
+	env: TelegramChannelBindings,
+	resolved: ResolvedTeachingPageReference,
+): string {
+	return [
+		`Hosted pages for ${referencedPagesLabel(resolved)}:`,
+		teachingPageIndexUrl(env, resolved.shareId),
+		resolved.path ? `Referenced page: ${teachingPageUrl(env, resolved.shareId, resolved.path)}` : undefined,
+		'',
+		'Paste the page URL in a normal message when you want the agent to use it.',
+	]
+		.filter((line): line is string => line !== undefined)
+		.join('\n');
+}
+
+function referencedPagesLabel(resolved: ResolvedTeachingPageReference): string {
+	if (resolved.source === 'session-id') {
+		return `session ${resolved.sessionId} (${TELEGRAM_MODEL_OPTIONS[resolved.modelKey ?? 'zai'].label})`;
+	}
+	if (resolved.source === 'share-id') {
+		return `share id ${resolved.shareId}`;
+	}
+	return 'referenced session';
 }
 
 /*
