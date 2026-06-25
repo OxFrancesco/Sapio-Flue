@@ -7,6 +7,8 @@
     "build": "flue build --target cloudflare",
     "dev": "flue dev --target cloudflare",
     "typecheck": "tsc --noEmit",
+    "relay:build": "tsc -p codex-relay/tsconfig.json",
+    "relay:start": "node codex-relay/dist/server.js",
     "deploy:dry-run": "npm run build && wrangler deploy --dry-run --config dist/sapio_flue_teacher/wrangler.json",
     "deploy": "npm run build && wrangler deploy --config dist/sapio_flue_teacher/wrangler.json"
   },
@@ -29,6 +31,7 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260620.1",
     "@flue/cli": "^1.0.0-beta.1",
+    "@types/node": "^26.0.0",
     "typescript": "^6.0.3",
     "wrangler": "^4.103.0"
   },

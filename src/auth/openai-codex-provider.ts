@@ -3,12 +3,20 @@ import { OPENAI_CODEX_MODEL, OPENAI_CODEX_PROVIDER } from './codex-auth';
 
 export interface CodexAuthBindingEnv {
 	CODEX_AUTH_VAULT?: DurableObjectNamespace;
+	CODEX_RELAY_BASE_URL?: string;
+	CODEX_RELAY_TOKEN?: string;
 	MODEL_SPECIFIER?: string;
 }
 
 interface TokenResponse {
 	apiKey: string;
 	expires: number;
+}
+
+interface CodexProviderRegistration {
+	apiKey: string;
+	baseUrl?: string;
+	headers?: Record<string, string>;
 }
 
 export async function prepareOpenAICodexProvider(
@@ -41,9 +49,25 @@ export async function prepareOpenAICodexProvider(
 		throw new Error('Codex auth bridge returned an invalid expiry timestamp.');
 	}
 
-	registerProvider(OPENAI_CODEX_PROVIDER, {
+	const registration: CodexProviderRegistration = {
 		apiKey: token.apiKey,
-	});
+	};
+	const relayBaseUrl = normalizeOptionalUrl(env.CODEX_RELAY_BASE_URL);
+	if (relayBaseUrl) {
+		const relayToken = env.CODEX_RELAY_TOKEN?.trim();
+		if (!relayToken) {
+			throw new Error('CODEX_RELAY_TOKEN is required when CODEX_RELAY_BASE_URL is set.');
+		}
+		registration.baseUrl = relayBaseUrl;
+		registration.headers = { 'x-codex-relay-token': relayToken };
+	}
+
+	registerProvider(OPENAI_CODEX_PROVIDER, registration);
 
 	return model;
+}
+
+function normalizeOptionalUrl(value: string | undefined): string | undefined {
+	const normalized = value?.trim().replace(/\/+$/, '');
+	return normalized && normalized.length > 0 ? normalized : undefined;
 }

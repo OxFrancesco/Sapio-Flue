@@ -105,6 +105,7 @@ Set Cloudflare secrets for deployed Workers:
 ```bash
 npx wrangler secret put WORKOS_API_KEY
 npx wrangler secret put CODEX_AUTH_ADMIN_TOKEN
+npx wrangler secret put CODEX_RELAY_TOKEN
 npx wrangler secret put TELEGRAM_BOT_TOKEN
 npx wrangler secret put TELEGRAM_WEBHOOK_SECRET_TOKEN
 npx wrangler secret put TELEGRAM_ALLOWED_USER_IDS
@@ -124,6 +125,8 @@ For local development, put the same names in `.dev.vars`:
 ```bash
 WORKOS_API_KEY="sk_..."
 CODEX_AUTH_ADMIN_TOKEN="local-admin-token"
+CODEX_RELAY_TOKEN="long-random-shared-secret"
+CODEX_RELAY_BASE_URL="https://your-relay.example.com"
 TELEGRAM_BOT_TOKEN="123456:telegram-bot-token"
 TELEGRAM_WEBHOOK_SECRET_TOKEN="letters_numbers_underscores_or_hyphens"
 TELEGRAM_ALLOWED_USER_IDS="123456789"
@@ -145,6 +148,17 @@ https://sapio-flue-teacher.<your-subdomain>.workers.dev/admin/codex-auth/login?a
 ```
 
 Both paths use the PI/OpenAI Codex OAuth credential shape and store the OAuth credentials for the Worker.
+
+Codex subscription inference must route through a non-Cloudflare Node relay because Cloudflare egress to `chatgpt.com` can be blocked even when OAuth succeeds. Deploy `codex-relay/` to a non-Cloudflare host, set the same `CODEX_RELAY_TOKEN` on the relay and Worker, then configure the Worker var:
+
+```bash
+npm run relay:build
+wrangler secret put CODEX_RELAY_TOKEN --config dist/sapio_flue_teacher/wrangler.json
+wrangler deploy --config dist/sapio_flue_teacher/wrangler.json \
+  --var CODEX_RELAY_BASE_URL:https://your-relay.example.com
+```
+
+Do not proxy the relay domain through Cloudflare. See `codex-relay/README.md` for the Docker service and relay environment.
 
 Check that the Vault object is configured without exposing tokens:
 
@@ -170,6 +184,7 @@ The teacher agent requests `thinkingLevel: "xhigh"` for `zai/glm-5.2`, which map
 
 ```bash
 npm run typecheck
+npm run relay:build
 npm run build
 npm run dev
 npm run deploy:dry-run

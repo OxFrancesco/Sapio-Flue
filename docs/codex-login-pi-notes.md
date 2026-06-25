@@ -25,3 +25,9 @@ The bot keeps the Worker-safe device-code exchange in `CodexAuthVault`, but expo
 4. Once OpenAI approves the login, the durable object stores the OAuth credentials in WorkOS Vault or durable object storage and refreshes them through `@earendil-works/pi-ai/oauth`.
 
 This keeps the PI credential shape and refresh bridge, while avoiding admin-token links or local callback assumptions in Telegram.
+
+## Inference Relay
+
+The Worker can complete the PI/OpenAI OAuth flow, but Codex subscription inference calls still target `https://chatgpt.com/backend-api/codex/responses`. Cloudflare egress can be blocked by ChatGPT, so the bot supports a non-Cloudflare relay for those inference calls.
+
+When `CODEX_RELAY_BASE_URL` and `CODEX_RELAY_TOKEN` are configured, `prepareOpenAICodexProvider()` registers the normal `openai-codex` PI provider with the relay as its `baseUrl` and sends `x-codex-relay-token` for relay authentication. The relay forwards the per-request Codex bearer token to ChatGPT and streams the response back. OAuth credentials remain in `CodexAuthVault`/WorkOS Vault; the relay does not store them.
