@@ -1,6 +1,7 @@
 import { observe } from '@flue/runtime';
 import { flue } from '@flue/runtime/routing';
 import { Hono } from 'hono';
+import { handleStripeWebhook, type StripeBillingBindingEnv } from './billing/stripe';
 import {
 	normalizeTeachingPagePath,
 	parseTeachingPagePathname,
@@ -12,7 +13,7 @@ import {
 	type TeachingPageRecord,
 } from './teaching-pages';
 
-interface Env extends TeachingPageBindingEnv {
+interface Env extends TeachingPageBindingEnv, StripeBillingBindingEnv {
 	CODEX_AUTH_VAULT?: DurableObjectNamespace;
 	CODEX_AUTH_ADMIN_TOKEN?: string;
 	TELEGRAM_BOT_TOKEN?: string;
@@ -78,6 +79,45 @@ app.get('/teach', (c) =>
 	),
 );
 app.get('/teach/*', serveTeachingPage);
+
+app.get('/billing/stripe/success', (c) =>
+	htmlResponse(
+		`<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Billing Connected</title></head>
+<body style="font:16px/1.45 system-ui,sans-serif;max-width:680px;margin:48px auto;padding:0 20px;color:#111">
+  <h1>Billing connected</h1>
+  <p>Your workspace subscription is being confirmed. Return to Telegram and use /workspace or /model.</p>
+</body>
+</html>`,
+	),
+);
+
+app.get('/billing/stripe/cancel', (c) =>
+	htmlResponse(
+		`<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Billing Cancelled</title></head>
+<body style="font:16px/1.45 system-ui,sans-serif;max-width:680px;margin:48px auto;padding:0 20px;color:#111">
+  <h1>Billing cancelled</h1>
+  <p>No subscription was created. Return to Telegram to choose BYOK or start checkout again.</p>
+</body>
+</html>`,
+	),
+);
+
+app.post('/billing/stripe/webhook', async (c) => {
+	try {
+		const result = await handleStripeWebhook(
+			c.env,
+			await c.req.text(),
+			c.req.header('stripe-signature'),
+		);
+		return c.json(result);
+	} catch (error) {
+		return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+	}
+});
 
 app.get('/codex-auth/device', async (c) => {
 	const state = c.req.query('state') ?? '';
@@ -305,7 +345,13 @@ function telegramBotCommands(): Array<{ command: string; description: string }> 
 	return [
 		{ command: 'start', description: 'Start the teacher bot' },
 		{ command: 'help', description: 'Show bot commands' },
-		{ command: 'model', description: 'Show or switch the model' },
+		{ command: 'workspace', description: 'Show the active study workspace' },
+		{ command: 'billing', description: 'Subscribe for platform models' },
+		{ command: 'invite', description: 'Create a workspace invite code' },
+		{ command: 'join', description: 'Join a study workspace invite' },
+		{ command: 'members', description: 'Show workspace members' },
+		{ command: 'model', description: 'Show or switch the workspace model' },
+		{ command: 'key', description: 'Attach a workspace model API key' },
 		{ command: 'codex', description: 'Connect Codex with browser login' },
 		{ command: 'new', description: 'Start a clean session' },
 		{ command: 'session', description: 'Show the current session' },

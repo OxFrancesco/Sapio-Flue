@@ -148,7 +148,7 @@ export function createTeachingPageTools({ env, agentId }: TeachingPageToolsOptio
 					},
 					modelKey: {
 						type: 'string',
-						enum: ['zai', 'codex'],
+						enum: ['zai', 'codex', 'openai'],
 						description:
 							'Optional model key for resolving a same-conversation session id. Defaults to the current session model.',
 					},
@@ -361,6 +361,7 @@ export async function resolveTeachingPageReference({
 		buildTelegramAgentId(current.baseConversationId, {
 			sessionId,
 			modelKey: resolvedModelKey,
+			...(current.state.workspaceId ? { workspaceId: current.state.workspaceId } : {}),
 		}),
 	);
 
@@ -485,7 +486,7 @@ function cleanReferencedModelKey(value: unknown): TelegramModelKey | undefined {
 
 	const trimmed = value.trim();
 	if (!isTelegramModelKey(trimmed)) {
-		throw new Error('modelKey must be "zai" or "codex".');
+		throw new Error('modelKey must be "zai", "codex", or "openai".');
 	}
 	return trimmed;
 }

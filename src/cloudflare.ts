@@ -1,4 +1,5 @@
 import { getOAuthApiKey, type OAuthCredentials } from '@earendil-works/pi-ai/oauth';
+import type { TelegramConversationRef } from '@flue/telegram';
 import { WorkOS } from '@workos-inc/node/worker';
 import { DurableObject } from 'cloudflare:workers';
 import {
@@ -28,6 +29,7 @@ import {
 interface Env {
 	WORKOS_API_KEY?: string;
 	WORKOS_VAULT_OBJECT_NAME?: string;
+	WORKOS_MODEL_VAULT_OBJECT_PREFIX?: string;
 	CODEX_AUTH_ADMIN_TOKEN?: string;
 }
 
@@ -81,6 +83,11 @@ const DO_AUTH_VALUE_KEY = 'codex-auth-document';
 const DO_AUTH_OBJECT_ID = 'codex-auth-durable-object-storage';
 const DO_AUTH_OBJECT_NAME = 'codex-auth-durable-object-storage';
 const TELEGRAM_STATE_PREFIX = 'telegram-state:';
+const TELEGRAM_REPLY_TARGET_PREFIX = 'telegram-reply-target:';
+const TELEGRAM_REPLY_TARGET_TTL_MS = 2 * 60 * 60 * 1000;
+const DEFAULT_MODEL_VAULT_OBJECT_PREFIX = 'sapio-flue-model-key';
+const MODEL_CREDENTIAL_VALUE_PREFIX = 'model-credential:';
+const MODEL_CREDENTIAL_DOCUMENT_TYPE = 'workspace-model-api-key';
 
 interface TelegramStateDocument extends TelegramAgentState {
 	updatedAt: string;
@@ -90,6 +97,16 @@ interface TelegramStatePatch {
 	modelKey?: TelegramModelKey;
 	sessionId?: string;
 	newSession?: boolean;
+	workspaceId?: string | null;
+}
+
+interface TelegramReplyTargetDocument {
+	agentId: string;
+	replyTargetId: string;
+	ref: TelegramConversationRef;
+	updateId?: number;
+	createdAt: string;
+	expiresAt: string;
 }
 
 export class TelegramBotState extends DurableObject<Env> {
@@ -97,25 +114,42 @@ export class TelegramBotState extends DurableObject<Env> {
 		const url = new URL(request.url);
 
 		try {
-			if (url.pathname !== '/state') {
-				return jsonResponse({ error: 'Not found.' }, { status: 404 });
+			if (url.pathname === '/state') {
+				const conversationId = url.searchParams.get('conversationId');
+				if (!conversationId) {
+					throw new HttpError('conversationId is required.', 400);
+				}
+
+				if (request.method === 'GET') {
+					return jsonResponse(await this.getState(conversationId));
+				}
+
+				if (request.method === 'POST') {
+					const patch = (await request.json()) as TelegramStatePatch;
+					return jsonResponse(await this.updateState(conversationId, patch));
+				}
+
+				return jsonResponse({ error: 'Method not allowed.' }, { status: 405 });
 			}
 
-			const conversationId = url.searchParams.get('conversationId');
-			if (!conversationId) {
-				throw new HttpError('conversationId is required.', 400);
+			if (url.pathname === '/reply-target') {
+				if (request.method === 'POST') {
+					return jsonResponse(await this.storeReplyTarget(await request.json()));
+				}
+
+				if (request.method === 'GET') {
+					return jsonResponse(
+						await this.getReplyTarget(
+							url.searchParams.get('agentId'),
+							url.searchParams.get('replyTargetId'),
+						),
+					);
+				}
+
+				return jsonResponse({ error: 'Method not allowed.' }, { status: 405 });
 			}
 
-			if (request.method === 'GET') {
-				return jsonResponse(await this.getState(conversationId));
-			}
-
-			if (request.method === 'POST') {
-				const patch = (await request.json()) as TelegramStatePatch;
-				return jsonResponse(await this.updateState(conversationId, patch));
-			}
-
-			return jsonResponse({ error: 'Method not allowed.' }, { status: 405 });
+			return jsonResponse({ error: 'Not found.' }, { status: 404 });
 		} catch (error) {
 			return jsonResponse(
 				{ error: error instanceof Error ? error.message : String(error) },
@@ -146,18 +180,62 @@ export class TelegramBotState extends DurableObject<Env> {
 			: patch.sessionId
 				? cleanSessionId(patch.sessionId)
 				: current.sessionId;
+		const workspaceId =
+			patch.workspaceId === undefined
+				? current.workspaceId
+				: patch.workspaceId === null
+					? undefined
+					: cleanWorkspaceId(patch.workspaceId);
 
 		const next: TelegramStateDocument = {
 			modelKey,
 			sessionId,
+			...(workspaceId ? { workspaceId } : {}),
 			updatedAt: new Date().toISOString(),
 		};
 		await this.ctx.storage.put(this.key(conversationId), next);
 		return next;
 	}
 
+	private async storeReplyTarget(input: unknown): Promise<TelegramReplyTargetDocument> {
+		const parsed = parseReplyTargetInput(input);
+		const now = new Date();
+		const document: TelegramReplyTargetDocument = {
+			agentId: parsed.agentId,
+			replyTargetId: parsed.replyTargetId,
+			ref: parsed.ref,
+			...(parsed.updateId === undefined ? {} : { updateId: parsed.updateId }),
+			createdAt: now.toISOString(),
+			expiresAt: new Date(now.getTime() + TELEGRAM_REPLY_TARGET_TTL_MS).toISOString(),
+		};
+		await this.ctx.storage.put(this.replyTargetKey(document.agentId, document.replyTargetId), document);
+		return document;
+	}
+
+	private async getReplyTarget(
+		agentId: string | null,
+		replyTargetId: string | null,
+	): Promise<TelegramReplyTargetDocument> {
+		const cleanAgentId = cleanAgentIdOrThrow(agentId);
+		const cleanReplyTargetId = cleanReplyTargetIdOrThrow(replyTargetId);
+		const key = this.replyTargetKey(cleanAgentId, cleanReplyTargetId);
+		const document = await this.ctx.storage.get<TelegramReplyTargetDocument>(key);
+		if (!document) {
+			throw new HttpError('Telegram reply target was not found.', 404);
+		}
+		if (Date.now() > Date.parse(document.expiresAt)) {
+			await this.ctx.storage.delete(key);
+			throw new HttpError('Telegram reply target expired.', 410);
+		}
+		return document;
+	}
+
 	private key(conversationId: string): string {
 		return `${TELEGRAM_STATE_PREFIX}${conversationId}`;
+	}
+
+	private replyTargetKey(agentId: string, replyTargetId: string): string {
+		return `${TELEGRAM_REPLY_TARGET_PREFIX}${agentId}:${replyTargetId}`;
 	}
 }
 
@@ -222,6 +300,170 @@ export class LessonPageStore extends DurableObject<Env> {
 			contentType: page.contentType,
 			updatedAt: page.updatedAt,
 		};
+	}
+}
+
+export class WorkspaceCredentialVault extends DurableObject<Env> {
+	async fetch(request: Request): Promise<Response> {
+		const url = new URL(request.url);
+
+		try {
+			if (url.pathname !== '/credential') {
+				return jsonResponse({ error: 'Not found.' }, { status: 404 });
+			}
+
+			if (request.method === 'PUT') {
+				return jsonResponse(await this.storeCredential(await request.json()));
+			}
+
+			if (request.method === 'GET') {
+				return jsonResponse(await this.readCredential(url.searchParams.get('vaultKey')));
+			}
+
+			if (request.method === 'DELETE') {
+				return jsonResponse(await this.deleteCredential(url.searchParams.get('vaultKey')));
+			}
+
+			return jsonResponse({ error: 'Method not allowed.' }, { status: 405 });
+		} catch (error) {
+			return jsonResponse(
+				{ error: error instanceof Error ? error.message : String(error) },
+				{ status: statusFromError(error) },
+			);
+		}
+	}
+
+	private async storeCredential(input: unknown) {
+		const parsed = parseModelCredentialInput(input);
+		const document = {
+			type: MODEL_CREDENTIAL_DOCUMENT_TYPE,
+			vaultKey: parsed.vaultKey,
+			provider: parsed.provider,
+			apiKey: parsed.apiKey,
+			updatedAt: new Date().toISOString(),
+		};
+
+		if (!this.env.WORKOS_API_KEY) {
+			await this.ctx.storage.put(this.storageKey(parsed.vaultKey), JSON.stringify(document));
+			return {
+				configured: true,
+				provider: parsed.provider,
+				vaultKey: parsed.vaultKey,
+				updatedAt: document.updatedAt,
+				storage: 'durable-object' as const,
+			};
+		}
+
+		const workos = this.workos();
+		const existing = await this.readVaultObjectIfExists(parsed.vaultKey, workos);
+		if (!existing) {
+			const metadata = await workos.vault.createObject({
+				name: this.objectName(parsed.vaultKey),
+				value: JSON.stringify(document),
+				context: {
+					app: 'sapio-flue',
+					kind: 'workspace-model-api-key',
+					provider: parsed.provider,
+					vaultKey: parsed.vaultKey,
+				},
+			});
+			return {
+				configured: true,
+				provider: parsed.provider,
+				vaultKey: parsed.vaultKey,
+				objectId: metadata.id,
+				versionId: metadata.versionId ?? null,
+				updatedAt: document.updatedAt,
+				storage: 'workos-vault' as const,
+			};
+		}
+
+		const updated = await workos.vault.updateObject({
+			id: existing.id,
+			value: JSON.stringify(document),
+			versionCheck: requiredVersionId(existing),
+		});
+		return {
+			configured: true,
+			provider: parsed.provider,
+			vaultKey: parsed.vaultKey,
+			objectId: updated.id,
+			versionId: updated.metadata.versionId ?? null,
+			updatedAt: document.updatedAt,
+			storage: 'workos-vault' as const,
+		};
+	}
+
+	private async readCredential(vaultKey: string | null) {
+		const cleanVaultKey = cleanVaultKeyOrThrow(vaultKey);
+		const value = await this.readCredentialValue(cleanVaultKey);
+		const document = parseModelCredentialDocument(value);
+		return {
+			provider: document.provider,
+			apiKey: document.apiKey,
+			updatedAt: document.updatedAt,
+		};
+	}
+
+	private async deleteCredential(vaultKey: string | null) {
+		const cleanVaultKey = cleanVaultKeyOrThrow(vaultKey);
+		if (!this.env.WORKOS_API_KEY) {
+			await this.ctx.storage.delete(this.storageKey(cleanVaultKey));
+			return { deleted: true, vaultKey: cleanVaultKey };
+		}
+
+		const existing = await this.readVaultObjectIfExists(cleanVaultKey);
+		if (!existing) {
+			return { deleted: false, vaultKey: cleanVaultKey };
+		}
+
+		await this.workos().vault.deleteObject({ id: existing.id });
+		return { deleted: true, vaultKey: cleanVaultKey };
+	}
+
+	private async readCredentialValue(vaultKey: string): Promise<string> {
+		if (!this.env.WORKOS_API_KEY) {
+			const value = await this.ctx.storage.get<string>(this.storageKey(vaultKey));
+			if (!value) {
+				throw new HttpError('Model credential was not found.', 404);
+			}
+			return value;
+		}
+
+		const object = await this.readVaultObjectIfExists(vaultKey);
+		if (!object?.value) {
+			throw new HttpError('Model credential was not found.', 404);
+		}
+		return object.value;
+	}
+
+	private async readVaultObjectIfExists(
+		vaultKey: string,
+		workos?: WorkOS,
+	): Promise<VaultObject | undefined> {
+		try {
+			return (await (workos ?? this.workos()).vault.readObjectByName(this.objectName(vaultKey))) as VaultObject;
+		} catch (error) {
+			if (statusFromError(error) === 404) {
+				return undefined;
+			}
+			throw error;
+		}
+	}
+
+	private workos(): WorkOS {
+		if (!this.env.WORKOS_API_KEY) {
+			throw new HttpError('WORKOS_API_KEY is not configured.', 503);
+		}
+		return new WorkOS(this.env.WORKOS_API_KEY);
+	}
+
+	private objectName(vaultKey: string): string {
+		return `${this.env.WORKOS_MODEL_VAULT_OBJECT_PREFIX ?? DEFAULT_MODEL_VAULT_OBJECT_PREFIX}-${vaultKey}`;
+	}
+
+	private storageKey(vaultKey: string): string {
+		return `${MODEL_CREDENTIAL_VALUE_PREFIX}${vaultKey}`;
 	}
 }
 
@@ -640,6 +882,199 @@ function randomToken(): string {
 	return base64Url(bytes);
 }
 
+interface ModelCredentialInput {
+	vaultKey: string;
+	provider: 'openai';
+	apiKey: string;
+}
+
+interface ModelCredentialDocument extends ModelCredentialInput {
+	type: typeof MODEL_CREDENTIAL_DOCUMENT_TYPE;
+	updatedAt: string;
+}
+
+function parseModelCredentialInput(input: unknown): ModelCredentialInput {
+	if (!isRecord(input)) {
+		throw new HttpError('Model credential input must be an object.', 400);
+	}
+
+	const vaultKey = cleanVaultKeyOrThrow(input.vaultKey);
+	if (input.provider !== 'openai') {
+		throw new HttpError('Only OpenAI model credentials are supported.', 400);
+	}
+	if (typeof input.apiKey !== 'string' || input.apiKey.trim().length < 8) {
+		throw new HttpError('apiKey is required.', 400);
+	}
+
+	return {
+		vaultKey,
+		provider: input.provider,
+		apiKey: input.apiKey.trim(),
+	};
+}
+
+function parseModelCredentialDocument(value: unknown): ModelCredentialDocument {
+	const parsed = typeof value === 'string' ? parseJson(value) : value;
+	if (!isRecord(parsed)) {
+		throw new HttpError('Stored model credential is not an object.', 500);
+	}
+	if (parsed.type !== MODEL_CREDENTIAL_DOCUMENT_TYPE) {
+		throw new HttpError('Stored model credential has an unsupported type.', 500);
+	}
+	if (parsed.provider !== 'openai') {
+		throw new HttpError('Stored model credential has an unsupported provider.', 500);
+	}
+	if (typeof parsed.apiKey !== 'string' || parsed.apiKey.length === 0) {
+		throw new HttpError('Stored model credential is missing apiKey.', 500);
+	}
+	if (typeof parsed.updatedAt !== 'string') {
+		throw new HttpError('Stored model credential is missing updatedAt.', 500);
+	}
+
+	return {
+		type: parsed.type,
+		provider: parsed.provider,
+		apiKey: parsed.apiKey,
+		vaultKey: cleanVaultKeyOrThrow(parsed.vaultKey),
+		updatedAt: parsed.updatedAt,
+	};
+}
+
+function cleanVaultKeyOrThrow(value: unknown): string {
+	if (typeof value !== 'string') {
+		throw new HttpError('vaultKey is required.', 400);
+	}
+	const cleaned = value.trim().toLowerCase();
+	if (!/^[a-z0-9][a-z0-9_-]{10,120}$/.test(cleaned)) {
+		throw new HttpError('vaultKey is invalid.', 400);
+	}
+	return cleaned;
+}
+
+function parseReplyTargetInput(input: unknown): {
+	agentId: string;
+	replyTargetId: string;
+	ref: TelegramConversationRef;
+	updateId?: number;
+} {
+	if (!isRecord(input)) {
+		throw new HttpError('Telegram reply target input must be an object.', 400);
+	}
+
+	return {
+		agentId: cleanAgentIdOrThrow(input.agentId),
+		replyTargetId: cleanReplyTargetIdOrThrow(input.replyTargetId),
+		ref: parseTelegramConversationRef(input.ref),
+		...(input.updateId === undefined ? {} : { updateId: cleanUpdateId(input.updateId) }),
+	};
+}
+
+function parseTelegramConversationRef(value: unknown): TelegramConversationRef {
+	if (!isRecord(value)) {
+		throw new HttpError('Telegram reply target ref must be an object.', 400);
+	}
+
+	const topic = {
+		...(value.messageThreadId === undefined
+			? {}
+			: { messageThreadId: cleanPositiveSafeInteger(value.messageThreadId, 'messageThreadId') }),
+		...(value.directMessagesTopicId === undefined
+			? {}
+			: {
+					directMessagesTopicId: cleanPositiveSafeInteger(
+						value.directMessagesTopicId,
+						'directMessagesTopicId',
+					),
+				}),
+	};
+	if ('messageThreadId' in topic && 'directMessagesTopicId' in topic) {
+		throw new HttpError('Telegram reply target cannot include two topic ids.', 400);
+	}
+
+	if (value.type === 'chat') {
+		return {
+			type: 'chat',
+			chatId: cleanTelegramChatId(value.chatId),
+			...topic,
+		};
+	}
+
+	if (value.type === 'business-chat') {
+		if (typeof value.businessConnectionId !== 'string' || !value.businessConnectionId.trim()) {
+			throw new HttpError('businessConnectionId is required.', 400);
+		}
+		return {
+			type: 'business-chat',
+			businessConnectionId: value.businessConnectionId.trim(),
+			chatId: cleanTelegramChatId(value.chatId),
+			...topic,
+		};
+	}
+
+	throw new HttpError('Telegram reply target type is unsupported.', 400);
+}
+
+function cleanAgentIdOrThrow(value: unknown): string {
+	if (typeof value !== 'string') {
+		throw new HttpError('agentId is required.', 400);
+	}
+	const cleaned = value.trim();
+	if (!cleaned || cleaned.length > 512) {
+		throw new HttpError('agentId is invalid.', 400);
+	}
+	return cleaned;
+}
+
+function cleanReplyTargetIdOrThrow(value: unknown): string {
+	if (typeof value !== 'string') {
+		throw new HttpError('replyTargetId is required.', 400);
+	}
+	const cleaned = value.trim();
+	if (!/^[A-Za-z0-9_-]{8,80}$/.test(cleaned)) {
+		throw new HttpError('replyTargetId is invalid.', 400);
+	}
+	return cleaned;
+}
+
+function cleanUpdateId(value: unknown): number {
+	return cleanSafeInteger(value, 'updateId', { minimum: 0 });
+}
+
+function cleanTelegramChatId(value: unknown): number {
+	const chatId = cleanSafeInteger(value, 'chatId');
+	if (chatId === 0) {
+		throw new HttpError('chatId is invalid.', 400);
+	}
+	return chatId;
+}
+
+function cleanPositiveSafeInteger(value: unknown, label: string): number {
+	return cleanSafeInteger(value, label, { minimum: 1 });
+}
+
+function cleanSafeInteger(
+	value: unknown,
+	label: string,
+	options: { minimum?: number } = {},
+): number {
+	if (!Number.isSafeInteger(value)) {
+		throw new HttpError(`${label} must be a safe integer.`, 400);
+	}
+	const integer = value as number;
+	if (options.minimum !== undefined && integer < options.minimum) {
+		throw new HttpError(`${label} is invalid.`, 400);
+	}
+	return integer;
+}
+
+function requiredVersionId(object: VaultObject): string {
+	const versionId = object.metadata.versionId;
+	if (!versionId) {
+		throw new Error('WorkOS Vault object did not include a versionId.');
+	}
+	return versionId;
+}
+
 function newSessionId(): string {
 	const bytes = crypto.getRandomValues(new Uint8Array(6));
 	return `${Date.now().toString(36)}-${base64Url(bytes)}`;
@@ -649,6 +1084,14 @@ function cleanSessionId(value: string): string {
 	const cleaned = value.trim().replaceAll(/[^a-zA-Z0-9_-]/g, '-').slice(0, 64);
 	if (!cleaned) {
 		throw new HttpError('sessionId must not be empty.', 400);
+	}
+	return cleaned;
+}
+
+function cleanWorkspaceId(value: string): string {
+	const cleaned = value.trim();
+	if (!cleaned || cleaned.length > 200 || /\s/.test(cleaned)) {
+		throw new HttpError('workspaceId is invalid.', 400);
 	}
 	return cleaned;
 }
@@ -667,6 +1110,14 @@ function parseErrorCode(body: string): string | undefined {
 		return typeof json.error === 'object' ? json.error.code : json.error;
 	} catch {
 		return undefined;
+	}
+}
+
+function parseJson(value: string): unknown {
+	try {
+		return JSON.parse(value) as unknown;
+	} catch {
+		throw new Error('Expected valid JSON.');
 	}
 }
 

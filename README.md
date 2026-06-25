@@ -7,19 +7,96 @@ Cloudflare-targeted Flue agent that gives a PI-powered agent access to Matt Poco
 - Flue source layout: `src/`
 - Agent: `src/agents/teacher.ts`
 - Skill: `.agents/skills/teach/SKILL.md`, installed with `npx skills add https://github.com/mattpocock/skills --skill teach`
-- Models: per-chat switching between `zai/glm-5.2` and `openai-codex/gpt-5.5`
+- Models: workspace switching between `zai/glm-5.2`, `openai-codex/gpt-5.5`, and OpenAI BYOK
+- Convex workspaces:
+  - Telegram users are upserted from Telegram `from` identity.
+  - Private chats get a personal workspace.
+  - Telegram groups/topics get a shared workspace so friends collaborate in the same study context.
+  - Invite codes let users join and switch a Telegram conversation to an existing workspace.
+- Stripe subscriptions:
+  - `/billing` creates a workspace checkout session.
+  - Stripe webhooks update Convex workspace plans.
+  - Free workspaces are blocked from platform-hosted models until they subscribe or switch to BYOK.
 - Runtime primitives: Cloudflare Workers, Durable Objects, and WorkOS Vault when configured
 - Hosted teaching pages: generated `lessons/`, `reference/`, and `assets/` files can be published to Cloudflare and served from `/teach/<session-share-id>/...`
 - Optional workspace sandbox: Cloudflare Shell durable Workspace via `src/sandboxes/cloudflare-shell.ts` when a `LOADER` Worker Loader binding is configured
 - Auth bridge:
   - `src/app.ts` exposes protected admin seed/status routes and mounts Flue.
   - `src/cloudflare.ts` exports `CodexAuthVault`, a Durable Object that reads PI OAuth credentials from WorkOS Vault when `WORKOS_API_KEY` is configured, or from Durable Object storage otherwise.
+  - `src/cloudflare.ts` also exports `WorkspaceCredentialVault`, which stores workspace model API keys in WorkOS Vault when configured, or Durable Object storage otherwise.
   - `src/auth/` contains shared credential validation and provider setup.
 - Telegram:
   - `src/channels/telegram.ts` exposes `POST /channels/telegram/webhook`.
-  - Incoming Telegram messages dispatch to the `teacher` agent instance for that chat/topic.
-  - The agent gets a scoped `post_telegram_message` tool so it can reply in the same conversation.
-  - `/model`, `/codex`, `/new`, `/session`, `/pages`, and `/help` are handled directly by the bot.
+  - Incoming Telegram messages dispatch to the shared workspace `teacher` agent instance when Convex is configured, or to the chat/topic instance otherwise.
+  - The agent gets a scoped `post_telegram_message` tool with a per-turn reply target so shared workspace sessions can still answer in the active Telegram conversation.
+  - `/workspace`, `/billing`, `/invite`, `/join`, `/members`, `/model`, `/key`, `/codex`, `/new`, `/session`, `/pages`, and `/help` are handled directly by the bot.
+
+## Convex workspaces
+
+Install/deploy Convex, then set one shared service token in both Convex and the Worker:
+
+```bash
+npx convex dev
+npx convex deploy
+
+export TELEGRAM_WORKER_TOKEN="$(openssl rand -hex 32)"
+npx convex env set TELEGRAM_WORKER_TOKEN "$TELEGRAM_WORKER_TOKEN"
+printf "%s" "$TELEGRAM_WORKER_TOKEN" | npx wrangler secret put CONVEX_SERVICE_TOKEN
+```
+
+Set `CONVEX_URL` on the Worker to your Convex deployment URL, for example:
+
+```bash
+printf "https://<your-deployment>.convex.cloud" | npx wrangler secret put CONVEX_URL
+```
+
+For local development, add these to `.dev.vars`:
+
+```bash
+CONVEX_URL="https://<your-deployment>.convex.cloud"
+CONVEX_SERVICE_TOKEN="same-value-as-TELEGRAM_WORKER_TOKEN"
+```
+
+The Convex functions are token-guarded because Telegram ids are not enough to secure public Convex endpoints. `TELEGRAM_WORKER_TOKEN` in Convex must match `CONVEX_SERVICE_TOKEN` in the Worker; otherwise user, workspace, billing, and credential metadata calls fail closed.
+
+Convex stores user/workspace/member/model/billing metadata only. Raw OpenAI API keys go through `WorkspaceCredentialVault`: WorkOS Vault when `WORKOS_API_KEY` is configured, otherwise Durable Object storage.
+
+## Stripe billing
+
+Create recurring Stripe Price IDs for your Pro and Team workspace plans, then configure the Worker:
+
+```bash
+npx wrangler secret put STRIPE_SECRET_KEY
+npx wrangler secret put STRIPE_WEBHOOK_SECRET
+npx wrangler secret put STRIPE_PRO_PRICE_ID
+npx wrangler secret put STRIPE_TEAM_PRICE_ID
+```
+
+For local development, add these to `.dev.vars`:
+
+```bash
+STRIPE_SECRET_KEY="sk_test_..."
+STRIPE_WEBHOOK_SECRET="whsec_..."
+STRIPE_PRO_PRICE_ID="price_..."
+STRIPE_TEAM_PRICE_ID="price_..."
+```
+
+Register the webhook endpoint in Stripe:
+
+```txt
+https://sapio-flue-teacher.<your-subdomain>.workers.dev/billing/stripe/webhook
+```
+
+Subscribe to at least these event types:
+
+```txt
+checkout.session.completed
+customer.subscription.created
+customer.subscription.updated
+customer.subscription.deleted
+```
+
+From Telegram, workspace owners/admins can use `/billing`, `/billing pro`, or `/billing team`. Checkout metadata carries the Convex workspace and user ids; the webhook verifies the Stripe signature before updating Convex. Platform-hosted ZAI/Codex models require a paid workspace plan. OpenAI BYOK remains available through `/key openai <api-key> [model]`.
 
 ## Codex auth setup
 
@@ -32,6 +109,12 @@ npx wrangler secret put TELEGRAM_BOT_TOKEN
 npx wrangler secret put TELEGRAM_WEBHOOK_SECRET_TOKEN
 npx wrangler secret put TELEGRAM_ALLOWED_USER_IDS
 npx wrangler secret put ZAI_API_KEY
+npx wrangler secret put CONVEX_URL
+npx wrangler secret put CONVEX_SERVICE_TOKEN
+npx wrangler secret put STRIPE_SECRET_KEY
+npx wrangler secret put STRIPE_WEBHOOK_SECRET
+npx wrangler secret put STRIPE_PRO_PRICE_ID
+npx wrangler secret put STRIPE_TEAM_PRICE_ID
 ```
 
 `WORKOS_API_KEY` is recommended but optional. Without it, the Codex OAuth credentials are stored in the `CodexAuthVault` Durable Object storage.
@@ -45,6 +128,12 @@ TELEGRAM_BOT_TOKEN="123456:telegram-bot-token"
 TELEGRAM_WEBHOOK_SECRET_TOKEN="letters_numbers_underscores_or_hyphens"
 TELEGRAM_ALLOWED_USER_IDS="123456789"
 ZAI_API_KEY="zai-api-key"
+CONVEX_URL="https://<your-deployment>.convex.cloud"
+CONVEX_SERVICE_TOKEN="same-value-as-TELEGRAM_WORKER_TOKEN"
+STRIPE_SECRET_KEY="sk_test_..."
+STRIPE_WEBHOOK_SECRET="whsec_..."
+STRIPE_PRO_PRICE_ID="price_..."
+STRIPE_TEAM_PRICE_ID="price_..."
 ```
 
 From Telegram, send `/codex` and tap **Open Codex login**. The bot creates a short-lived browser login link, shows the OpenAI code, and stores the credentials automatically after approval.
@@ -139,8 +228,16 @@ Bot commands:
 
 ```txt
 /model        Show the current model and available choices.
-/model zai    Switch this Telegram conversation to ZAI GLM-5.2 Max.
-/model codex  Switch this Telegram conversation to Codex GPT-5.5.
+/model zai    Switch this workspace to ZAI GLM-5.2 Max.
+/model codex  Switch this workspace to Codex GPT-5.5.
+/model openai Switch this workspace to OpenAI BYOK after /key setup.
+/workspace    Show the active study workspace.
+/billing      Subscribe for platform-hosted models.
+/members      Show workspace members.
+/invite       Create an invite code for the active workspace.
+/join <code>  Join a workspace and make it active in this Telegram conversation.
+/key openai <api-key> [model]
+              Store a workspace OpenAI key and switch the workspace to OpenAI BYOK.
 /new          Start a clean session with the current model.
 /new zai      Start a clean session on ZAI GLM-5.2 Max.
 /session      Show the current session id and model.
@@ -151,7 +248,9 @@ Bot commands:
 /help         Show command help.
 ```
 
-The bot stores the selected model and current session id per Telegram chat/topic in the `TelegramBotState` Durable Object. A new session is implemented as a new Flue agent instance id, so old session history remains durable but stops being used.
+With Convex configured, every Telegram user is signed in from Telegram profile data on each message. Private chats get a personal workspace by default. Telegram groups, topics, and joined invite codes use a shared study workspace, so members share the same durable teacher session, model selection, hosted lesson page index, and billing/BYOK settings. `/new` starts a clean shared workspace session; old session history and hosted pages remain durable but stop being used for new prompts.
+
+The bot stores Telegram chat-to-workspace routing plus the current workspace session id in the `TelegramBotState` Durable Object. Without Convex, the same state falls back to one session per Telegram chat/topic.
 
 To make the bot answer only to you, leave `TELEGRAM_ALLOWED_USER_IDS` unset at first, message `/whoami` to the bot, then set the returned numeric user id as a Worker secret:
 
@@ -184,9 +283,9 @@ https://sapio-flue-teacher.<your-subdomain>.workers.dev/teach/<session-share-id>
 https://sapio-flue-teacher.<your-subdomain>.workers.dev/teach/<session-share-id>/lessons/intro.html
 ```
 
-Use `/pages` in Telegram to get the index URL for the current chat/session. Starting a new session with `/new` creates a new page index.
+Use `/pages` in Telegram to get the index URL for the current workspace session. Starting a new session with `/new` creates a new page index for that workspace.
 
-The teacher agent can automatically list pages it published in the current session. To let it use pages from another session, reference a hosted `/teach/<share-id>` URL, a 32-character share id, or a same-conversation session id in your message. The agent has a dedicated `inspect_teaching_page_reference` tool for those explicit references, and it is instructed not to search unrelated sessions without one.
+The teacher agent can automatically list pages it published in the current session. To let it use pages from another session, reference a hosted `/teach/<share-id>` URL, a 32-character share id, or a same-workspace session id in your message. The agent has a dedicated `inspect_teaching_page_reference` tool for those explicit references, and it is instructed not to search unrelated sessions without one.
 
 Deploy with the generated Wrangler config:
 

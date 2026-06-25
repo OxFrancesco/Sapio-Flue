@@ -23,6 +23,10 @@
     {
       "tag": "lesson-page-store-v1",
       "new_sqlite_classes": ["LessonPageStore"]
+    },
+    {
+      "tag": "workspace-credential-vault-v1",
+      "new_sqlite_classes": ["WorkspaceCredentialVault"]
     }
   ],
   "durable_objects": {
@@ -38,12 +42,17 @@
       {
         "name": "LESSON_PAGE_STORE",
         "class_name": "LessonPageStore"
+      },
+      {
+        "name": "WORKSPACE_CREDENTIAL_VAULT",
+        "class_name": "WorkspaceCredentialVault"
       }
     ]
   },
   "vars": {
     "MODEL_SPECIFIER": "zai/glm-5.2",
     "WORKOS_VAULT_OBJECT_NAME": "sapio-flue-openai-codex-auth",
+    "WORKOS_MODEL_VAULT_OBJECT_PREFIX": "sapio-flue-model-key",
     "PUBLIC_BASE_URL": "https://sapio-flue-teacher.oddofrancesco000.workers.dev"
   }
 }

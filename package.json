@@ -22,6 +22,7 @@
     "@flue/telegram": "^1.0.0-beta.1",
     "@workos-inc/node": "^10.4.0",
     "agents": "^0.14.5",
+    "convex": "^1.42.0",
     "grammy": "^1.44.0",
     "hono": "^4.12.26"
   },
