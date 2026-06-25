@@ -23,7 +23,18 @@ CODEX_RELAY_TOKEN=dev-secret npm run relay:start
 curl http://localhost:8788/health
 ```
 
-## Deploy
+## Vercel
+
+The relay can run as Vercel Node functions. Deploy `codex-relay/` as the Vercel project root:
+
+```sh
+vercel env add CODEX_RELAY_TOKEN
+vercel deploy codex-relay -y
+```
+
+Use the deployment URL itself as `CODEX_RELAY_BASE_URL`; `vercel.json` rewrites `/codex/responses` to the function route. The default Vercel function duration is configured at 300 seconds so it works on Hobby. Pro and Enterprise projects can raise `api/codex/responses.ts` to 800 seconds, or 1800 seconds where Vercel's extended-duration beta is enabled.
+
+## Docker
 
 Deploy this service on a non-Cloudflare Node runtime such as Fly.io, Render, Railway, or any Docker host.
 

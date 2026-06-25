@@ -149,10 +149,12 @@ https://sapio-flue-teacher.<your-subdomain>.workers.dev/admin/codex-auth/login?a
 
 Both paths use the PI/OpenAI Codex OAuth credential shape and store the OAuth credentials for the Worker.
 
-Codex subscription inference must route through a non-Cloudflare Node relay because Cloudflare egress to `chatgpt.com` can be blocked even when OAuth succeeds. Deploy `codex-relay/` to a non-Cloudflare host, set the same `CODEX_RELAY_TOKEN` on the relay and Worker, then configure the Worker var:
+Codex subscription inference must route through a non-Cloudflare Node relay because Cloudflare egress to `chatgpt.com` can be blocked even when OAuth succeeds. Deploy `codex-relay/` to Vercel or another non-Cloudflare host, set the same `CODEX_RELAY_TOKEN` on the relay and Worker, then configure the Worker var:
 
 ```bash
 npm run relay:build
+vercel env add CODEX_RELAY_TOKEN
+vercel deploy codex-relay -y
 wrangler secret put CODEX_RELAY_TOKEN --config dist/sapio_flue_teacher/wrangler.json
 wrangler deploy --config dist/sapio_flue_teacher/wrangler.json \
   --var CODEX_RELAY_BASE_URL:https://your-relay.example.com
