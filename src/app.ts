@@ -1,6 +1,7 @@
 import { observe } from '@flue/runtime';
 import { flue } from '@flue/runtime/routing';
 import { Hono } from 'hono';
+import { mobileApi, type MobileApiBindingEnv } from './api/mobile';
 import type { PolarBillingBindingEnv } from './billing/polar';
 import {
 	normalizeTeachingPagePath,
@@ -13,7 +14,7 @@ import {
 	type TeachingPageRecord,
 } from './teaching-pages';
 
-interface Env extends TeachingPageBindingEnv, PolarBillingBindingEnv {
+interface Env extends TeachingPageBindingEnv, PolarBillingBindingEnv, MobileApiBindingEnv {
 	CODEX_AUTH_VAULT?: DurableObjectNamespace;
 	CODEX_AUTH_ADMIN_TOKEN?: string;
 	TELEGRAM_BOT_TOKEN?: string;
@@ -294,6 +295,7 @@ app.get('/admin/codex-auth/device/complete', async (c) => {
 	);
 });
 
+app.route('/api/mobile', mobileApi);
 app.route('/', flue());
 
 export default app;
