@@ -1,5 +1,5 @@
 import { ConvexError, v } from 'convex/values';
-import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server';
+import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server';
 import type { Doc, Id } from './_generated/dataModel';
 
 declare const process: { env: Record<string, string | undefined> };
@@ -16,6 +16,7 @@ const workspaceKind = v.union(
 const workspaceRole = v.union(v.literal('owner'), v.literal('admin'), v.literal('member'));
 const membershipStatus = v.union(v.literal('active'), v.literal('invited'), v.literal('removed'));
 const credentialProvider = v.union(v.literal('openai'));
+const billingProvider = v.union(v.literal('stripe'), v.literal('polar'));
 const billingStatus = v.union(
 	v.literal('active'),
 	v.literal('trialing'),
@@ -85,7 +86,7 @@ const modelCredentialSummary = v.object({
 
 const billingSubscriptionSummary = v.object({
 	id: v.id('billingSubscriptions'),
-	provider: v.literal('stripe'),
+	provider: billingProvider,
 	providerCustomerId: v.optional(v.string()),
 	providerSubscriptionId: v.string(),
 	plan,
@@ -290,12 +291,11 @@ export const getBillingCheckoutContext = query({
 	},
 });
 
-export const applyStripeBillingEvent = mutation({
+export const applyPolarBillingEvent = internalMutation({
 	args: {
-		...serviceArgs,
 		eventId: v.string(),
 		eventType: v.string(),
-		workspaceId: v.id('workspaces'),
+		workspaceId: v.string(),
 		plan: v.union(v.literal('pro'), v.literal('team')),
 		status: billingStatus,
 		customerId: v.optional(v.string()),
@@ -305,40 +305,39 @@ export const applyStripeBillingEvent = mutation({
 	},
 	returns: v.object({
 		processed: v.boolean(),
-		workspace: workspaceSummary,
-		subscription: billingSubscriptionSummary,
+		reason: v.optional(v.string()),
 	}),
 	handler: async (ctx, args) => {
-		assertServiceToken(args.serviceToken);
+		const workspace = await ctx.db.get(args.workspaceId as Id<'workspaces'>).catch(() => null);
+		if (!workspace) {
+			return { processed: false, reason: 'workspace_not_found' };
+		}
+
 		const existingEvent = await ctx.db
 			.query('billingEvents')
 			.withIndex('by_provider_event', (q) =>
-				q.eq('provider', 'stripe').eq('eventId', args.eventId),
+				q.eq('provider', 'polar').eq('eventId', args.eventId),
 			)
 			.unique();
-		const existingSubscription = await stripeSubscription(ctx, args.subscriptionId);
+		const existingSubscription = await providerSubscription(ctx, 'polar', args.subscriptionId);
 		if (existingEvent && existingSubscription) {
-			return {
-				processed: false,
-				workspace: workspaceToSummary(await requireWorkspace(ctx, args.workspaceId)),
-				subscription: requiredBillingSubscriptionToSummary(existingSubscription),
-			};
+			return { processed: false, reason: 'duplicate_event' };
 		}
 
 		const now = new Date().toISOString();
 		if (!existingEvent) {
 			await ctx.db.insert('billingEvents', {
-				provider: 'stripe',
+				provider: 'polar',
 				eventId: args.eventId,
 				eventType: args.eventType,
-				workspaceId: args.workspaceId,
+				workspaceId: workspace._id,
 				processedAt: now,
 			});
 		}
 
 		const subscriptionPatch = {
-			workspaceId: args.workspaceId,
-			provider: 'stripe' as const,
+			workspaceId: workspace._id,
+			provider: 'polar' as const,
 			providerCustomerId: args.customerId,
 			providerSubscriptionId: args.subscriptionId,
 			plan: args.plan,
@@ -358,20 +357,12 @@ export const applyStripeBillingEvent = mutation({
 		}
 
 		const paidPlan = isPaidBillingStatus(args.status) ? args.plan : 'free';
-		await ctx.db.patch(args.workspaceId, {
+		await ctx.db.patch(workspace._id, {
 			plan: paidPlan,
 			updatedAt: now,
 		});
 
-		const subscription = await stripeSubscription(ctx, args.subscriptionId);
-		if (!subscription) {
-			throw new ConvexError('Unable to load saved billing subscription.');
-		}
-		return {
-			processed: true,
-			workspace: workspaceToSummary(await requireWorkspace(ctx, args.workspaceId)),
-			subscription: requiredBillingSubscriptionToSummary(subscription),
-		};
+		return { processed: true };
 	},
 });
 
@@ -790,14 +781,15 @@ async function latestBillingSubscription(
 		.first();
 }
 
-async function stripeSubscription(
+async function providerSubscription(
 	ctx: QueryCtx | MutationCtx,
+	provider: Doc<'billingSubscriptions'>['provider'],
 	subscriptionId: string,
 ): Promise<Doc<'billingSubscriptions'> | null> {
 	return await ctx.db
 		.query('billingSubscriptions')
 		.withIndex('by_provider_subscription', (q) =>
-			q.eq('provider', 'stripe').eq('providerSubscriptionId', subscriptionId),
+			q.eq('provider', provider).eq('providerSubscriptionId', subscriptionId),
 		)
 		.unique();
 }

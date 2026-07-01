@@ -66,7 +66,7 @@ export interface WorkspaceModelCredential {
 
 export interface BillingSubscription {
 	id: string;
-	provider: 'stripe';
+	provider: 'stripe' | 'polar';
 	providerCustomerId?: string;
 	providerSubscriptionId: string;
 	plan: SyncedWorkspace['plan'];
@@ -175,25 +175,22 @@ const getBillingCheckoutContextRef = makeFunctionReference<
 	}
 >('telegram:getBillingCheckoutContext');
 
-const applyStripeBillingEventRef = makeFunctionReference<
-	'mutation',
+const createPolarCheckoutRef = makeFunctionReference<
+	'action',
 	ServiceArgs & {
-		eventId: string;
-		eventType: string;
 		workspaceId: string;
+		userId: string;
 		plan: 'pro' | 'team';
-		status: BillingSubscription['status'];
-		customerId?: string;
-		subscriptionId: string;
-		currentPeriodEnd?: string;
-		cancelAtPeriodEnd?: boolean;
+		successUrl: string;
+		cancelUrl: string;
 	},
 	{
-		processed: boolean;
+		checkoutId: string;
+		url: string;
 		workspace: SyncedWorkspace;
-		subscription: BillingSubscription;
+		plan: 'pro' | 'team';
 	}
->('telegram:applyStripeBillingEvent');
+>('polar:createCheckout');
 
 export function isConvexConfigured(env: ConvexBindingEnv): boolean {
 	return Boolean(env.CONVEX_URL?.trim());
@@ -274,21 +271,22 @@ export async function getBillingCheckoutContext(
 	return convexClient(env).query(getBillingCheckoutContextRef, withServiceToken(env, args));
 }
 
-export async function applyStripeBillingEvent(
+export async function createPolarCheckout(
 	env: ConvexBindingEnv,
 	args: {
-		eventId: string;
-		eventType: string;
 		workspaceId: string;
+		userId: string;
 		plan: 'pro' | 'team';
-		status: BillingSubscription['status'];
-		customerId?: string;
-		subscriptionId: string;
-		currentPeriodEnd?: string;
-		cancelAtPeriodEnd?: boolean;
+		successUrl: string;
+		cancelUrl: string;
 	},
-): Promise<{ processed: boolean; workspace: SyncedWorkspace; subscription: BillingSubscription }> {
-	return convexClient(env).mutation(applyStripeBillingEventRef, withServiceToken(env, args));
+): Promise<{
+	checkoutId: string;
+	url: string;
+	workspace: SyncedWorkspace;
+	plan: 'pro' | 'team';
+}> {
+	return convexClient(env).action(createPolarCheckoutRef, withServiceToken(env, args));
 }
 
 function convexClient(env: ConvexBindingEnv): ConvexHttpClient {

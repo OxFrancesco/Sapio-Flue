@@ -13,9 +13,9 @@ Cloudflare-targeted Flue agent that gives a PI-powered agent access to Matt Poco
   - Private chats get a personal workspace.
   - Telegram groups/topics get a shared workspace so friends collaborate in the same study context.
   - Invite codes let users join and switch a Telegram conversation to an existing workspace.
-- Stripe subscriptions:
+- Polar subscriptions through the Convex Polar component:
   - `/billing` creates a workspace checkout session.
-  - Stripe webhooks update Convex workspace plans.
+  - Polar webhooks update Convex workspace plans.
   - Free workspaces are blocked from platform-hosted models until they subscribe or switch to BYOK.
 - Runtime primitives: Cloudflare Workers, Durable Objects, and WorkOS Vault when configured
 - Hosted teaching pages: generated `lessons/`, `reference/`, and `assets/` files can be published to Cloudflare and served from `/teach/<session-share-id>/...`
@@ -61,42 +61,46 @@ The Convex functions are token-guarded because Telegram ids are not enough to se
 
 Convex stores user/workspace/member/model/billing metadata only. Raw OpenAI API keys go through `WorkspaceCredentialVault`: WorkOS Vault when `WORKOS_API_KEY` is configured, otherwise Durable Object storage.
 
-## Stripe billing
+## Polar billing
 
-Create recurring Stripe Price IDs for your Pro and Team workspace plans, then configure the Worker:
-
-```bash
-npx wrangler secret put STRIPE_SECRET_KEY
-npx wrangler secret put STRIPE_WEBHOOK_SECRET
-npx wrangler secret put STRIPE_PRO_PRICE_ID
-npx wrangler secret put STRIPE_TEAM_PRICE_ID
-```
-
-For local development, add these to `.dev.vars`:
+Create recurring Polar products for your Pro and Team workspace plans. Billing secrets live in Convex, not in the Worker:
 
 ```bash
-STRIPE_SECRET_KEY="sk_test_..."
-STRIPE_WEBHOOK_SECRET="whsec_..."
-STRIPE_PRO_PRICE_ID="price_..."
-STRIPE_TEAM_PRICE_ID="price_..."
+npx convex env set POLAR_ORGANIZATION_TOKEN <organization-token>
+npx convex env set POLAR_WEBHOOK_SECRET <webhook-secret>
+npx convex env set POLAR_PRO_PRODUCT_ID <pro-product-id>
+npx convex env set POLAR_TEAM_PRODUCT_ID <team-product-id>
+npx convex env set POLAR_SERVER sandbox # or production
 ```
 
-Register the webhook endpoint in Stripe:
+The Worker only needs Convex access for billing checkout creation:
+
+```bash
+CONVEX_URL="https://<your-deployment>.convex.cloud"
+CONVEX_SERVICE_TOKEN="same-value-as-TELEGRAM_WORKER_TOKEN"
+```
+
+Register the webhook endpoint in Polar against your Convex site URL:
 
 ```txt
-https://sapio-flue-teacher.<your-subdomain>.workers.dev/billing/stripe/webhook
+https://<your-deployment>.convex.site/polar/events
 ```
 
 Subscribe to at least these event types:
 
 ```txt
-checkout.session.completed
-customer.subscription.created
-customer.subscription.updated
-customer.subscription.deleted
+product.created
+product.updated
+subscription.created
+subscription.updated
+subscription.active
+subscription.canceled
+subscription.revoked
+subscription.uncanceled
+subscription.past_due
 ```
 
-From Telegram, workspace owners/admins can use `/billing`, `/billing pro`, or `/billing team`. Checkout metadata carries the Convex workspace and user ids; the webhook verifies the Stripe signature before updating Convex. Platform-hosted ZAI/Codex models require a paid workspace plan. OpenAI BYOK remains available through `/key openai <api-key> [model]`.
+From Telegram, workspace owners/admins can use `/billing`, `/billing pro`, or `/billing team`. Checkout metadata carries the Convex workspace and user ids; the Convex Polar component verifies the webhook before updating the workspace plan. Platform-hosted ZAI/Codex models require a paid workspace plan. OpenAI BYOK remains available through `/key openai <api-key> [model]`.
 
 ## Codex auth setup
 
@@ -112,10 +116,6 @@ npx wrangler secret put TELEGRAM_ALLOWED_USER_IDS
 npx wrangler secret put ZAI_API_KEY
 npx wrangler secret put CONVEX_URL
 npx wrangler secret put CONVEX_SERVICE_TOKEN
-npx wrangler secret put STRIPE_SECRET_KEY
-npx wrangler secret put STRIPE_WEBHOOK_SECRET
-npx wrangler secret put STRIPE_PRO_PRICE_ID
-npx wrangler secret put STRIPE_TEAM_PRICE_ID
 ```
 
 `WORKOS_API_KEY` is recommended but optional. Without it, the Codex OAuth credentials are stored in the `CodexAuthVault` Durable Object storage.
@@ -133,10 +133,6 @@ TELEGRAM_ALLOWED_USER_IDS="123456789"
 ZAI_API_KEY="zai-api-key"
 CONVEX_URL="https://<your-deployment>.convex.cloud"
 CONVEX_SERVICE_TOKEN="same-value-as-TELEGRAM_WORKER_TOKEN"
-STRIPE_SECRET_KEY="sk_test_..."
-STRIPE_WEBHOOK_SECRET="whsec_..."
-STRIPE_PRO_PRICE_ID="price_..."
-STRIPE_TEAM_PRICE_ID="price_..."
 ```
 
 From Telegram, send `/codex` and tap **Open Codex login**. The bot creates a short-lived browser login link, shows the OpenAI code, and stores the credentials automatically after approval.

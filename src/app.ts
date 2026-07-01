@@ -1,7 +1,7 @@
 import { observe } from '@flue/runtime';
 import { flue } from '@flue/runtime/routing';
 import { Hono } from 'hono';
-import { handleStripeWebhook, type StripeBillingBindingEnv } from './billing/stripe';
+import type { PolarBillingBindingEnv } from './billing/polar';
 import {
 	normalizeTeachingPagePath,
 	parseTeachingPagePathname,
@@ -13,7 +13,7 @@ import {
 	type TeachingPageRecord,
 } from './teaching-pages';
 
-interface Env extends TeachingPageBindingEnv, StripeBillingBindingEnv {
+interface Env extends TeachingPageBindingEnv, PolarBillingBindingEnv {
 	CODEX_AUTH_VAULT?: DurableObjectNamespace;
 	CODEX_AUTH_ADMIN_TOKEN?: string;
 	TELEGRAM_BOT_TOKEN?: string;
@@ -80,7 +80,7 @@ app.get('/teach', (c) =>
 );
 app.get('/teach/*', serveTeachingPage);
 
-app.get('/billing/stripe/success', (c) =>
+app.get('/billing/polar/success', (c) =>
 	htmlResponse(
 		`<!doctype html>
 <html lang="en">
@@ -93,7 +93,7 @@ app.get('/billing/stripe/success', (c) =>
 	),
 );
 
-app.get('/billing/stripe/cancel', (c) =>
+app.get('/billing/polar/cancel', (c) =>
 	htmlResponse(
 		`<!doctype html>
 <html lang="en">
@@ -105,19 +105,6 @@ app.get('/billing/stripe/cancel', (c) =>
 </html>`,
 	),
 );
-
-app.post('/billing/stripe/webhook', async (c) => {
-	try {
-		const result = await handleStripeWebhook(
-			c.env,
-			await c.req.text(),
-			c.req.header('stripe-signature'),
-		);
-		return c.json(result);
-	} catch (error) {
-		return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
-	}
-});
 
 app.get('/codex-auth/device', async (c) => {
 	const state = c.req.query('state') ?? '';

@@ -1,14 +1,15 @@
 import { createTelegramChannel, type TelegramConversationRef } from '@flue/telegram';
 import { defineTool, dispatch } from '@flue/runtime';
+import { Effect } from 'effect';
 import { Api } from 'grammy';
 import type { InlineKeyboardMarkup, Message } from 'grammy/types';
 import teacher from '../agents/teacher';
 import {
-	createStripeCheckoutSession,
-	isStripeBillingConfigured,
+	createPolarCheckoutSession,
+	isPolarBillingConfigured,
 	type PaidWorkspacePlan,
-	type StripeBillingBindingEnv,
-} from '../billing/stripe';
+	type PolarBillingBindingEnv,
+} from '../billing/polar';
 import {
 	createWorkspaceInvite,
 	getWorkspace,
@@ -46,6 +47,16 @@ import {
 	publicBaseUrl,
 	type TeachingPageBindingEnv,
 } from '../teaching-pages';
+import { AuthBridgeError, renderUserError } from '../effect/errors';
+import { responseJson } from '../effect/http';
+import { annotateFlow, retryIdempotent, runEffect } from '../effect/runtime';
+import {
+	CodexDeviceStartResponseSchema,
+	CodexStatusResponseSchema,
+	TelegramReplyTargetDocumentSchema,
+	TelegramReplyTargetResponseSchema,
+	TelegramStateDocumentSchema,
+} from '../effect/schemas';
 
 export interface TelegramReplyTargetBindingEnv {
 	TELEGRAM_BOT_STATE?: DurableObjectNamespace;
@@ -55,7 +66,7 @@ interface TelegramChannelBindings
 	extends TeachingPageBindingEnv,
 		ConvexBindingEnv,
 		WorkspaceCredentialVaultBindingEnv,
-		StripeBillingBindingEnv,
+		PolarBillingBindingEnv,
 		TelegramReplyTargetBindingEnv {
 	CODEX_AUTH_ADMIN_TOKEN?: string;
 	CODEX_AUTH_VAULT?: DurableObjectNamespace;
@@ -785,7 +796,7 @@ async function createTelegramReplyTarget(
 		throw new Error(`Unable to store Telegram reply target (${response.status}): ${await response.text()}`);
 	}
 
-	return ((await response.json()) as { replyTargetId: string }).replyTargetId;
+	return (await runEffect(responseJson(response, TelegramReplyTargetResponseSchema, 'telegram reply target response'))).replyTargetId;
 }
 
 async function getTelegramReplyTarget(
@@ -800,7 +811,11 @@ async function getTelegramReplyTarget(
 		url.searchParams.set('replyTargetId', replyTargetId);
 		const response = await stub.fetch(new Request(url));
 		if (response.ok) {
-			return ((await response.json()) as { ref: TelegramConversationRef }).ref;
+			return (
+				(await runEffect(responseJson(response, TelegramReplyTargetDocumentSchema, 'telegram reply target document'))) as {
+					ref: TelegramConversationRef;
+				}
+			).ref;
 		}
 		console.warn('[telegram:send] unable to read reply target', {
 			agentId,
@@ -1053,15 +1068,15 @@ async function sendBillingCheckout(
 	authContext: SyncedTelegramContext,
 	plan: PaidWorkspacePlan,
 ): Promise<void> {
-	if (!isStripeBillingConfigured(env)) {
-		await sendText(ref, stripeBillingUnavailableText(), { replyMarkup: commandCenterKeyboard() });
+	if (!isPolarBillingConfigured(env)) {
+		await sendText(ref, polarBillingUnavailableText(), { replyMarkup: commandCenterKeyboard() });
 		return;
 	}
 
 	try {
-		const successUrl = new URL('/billing/stripe/success', publicBaseUrl(env));
-		const cancelUrl = new URL('/billing/stripe/cancel', publicBaseUrl(env));
-		const checkout = await createStripeCheckoutSession(env, {
+		const successUrl = new URL('/billing/polar/success', publicBaseUrl(env));
+		const cancelUrl = new URL('/billing/polar/cancel', publicBaseUrl(env));
+		const checkout = await createPolarCheckoutSession(env, {
 			workspaceId: authContext.workspace.id,
 			userId: authContext.user.id,
 			plan,
@@ -1192,11 +1207,34 @@ async function getConversationState(
 		};
 	}
 
-	const response = await stub.fetch(stateRequest(conversationId));
-	if (!response.ok) {
-		throw new Error(`Unable to read Telegram bot state (${response.status}): ${await response.text()}`);
-	}
-	return (await response.json()) as TelegramStateDocument;
+	return runEffect(
+		annotateFlow(
+			retryIdempotent(
+				Effect.gen(function* () {
+					const response = yield* Effect.tryPromise({
+						try: () => stub.fetch(stateRequest(conversationId)),
+						catch: (cause) =>
+							new AuthBridgeError({
+								operation: 'telegram_bot_state.read',
+								message: 'Unable to read Telegram bot state before receiving a response.',
+								cause,
+							}),
+					});
+					if (!response.ok) {
+						const body = yield* Effect.promise(() => response.text().catch(() => ''));
+						return yield* Effect.fail(
+							new AuthBridgeError({
+								operation: 'telegram_bot_state.read',
+								message: `Unable to read Telegram bot state (${response.status}): ${body}`,
+							}),
+						);
+					}
+					return yield* responseJson(response, TelegramStateDocumentSchema, 'telegram bot state');
+				}),
+			),
+			{ conversationId },
+		),
+	);
 }
 
 async function updateConversationState(
@@ -1219,7 +1257,7 @@ async function updateConversationState(
 	if (!response.ok) {
 		throw new Error(`Unable to update Telegram bot state (${response.status}): ${await response.text()}`);
 	}
-	return (await response.json()) as TelegramStateDocument;
+	return runEffect(responseJson(response, TelegramStateDocumentSchema, 'telegram bot state'));
 }
 
 function stateStore(env: TelegramReplyTargetBindingEnv): DurableObjectStub | undefined {
@@ -1761,11 +1799,11 @@ function platformBillingRequiredText(authContext: SyncedTelegramContext): string
 	].join('\n');
 }
 
-function stripeBillingUnavailableText(): string {
+function polarBillingUnavailableText(): string {
 	return [
 		'# Billing unavailable',
-		'Stripe billing is not configured for this Worker yet.',
-		'Set STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PRO_PRICE_ID, and STRIPE_TEAM_PRICE_ID to enable subscriptions.',
+		'Polar billing is not configured yet.',
+		'Set CONVEX_URL on the Worker and POLAR_ORGANIZATION_TOKEN, POLAR_WEBHOOK_SECRET, POLAR_PRO_PRODUCT_ID, and POLAR_TEAM_PRODUCT_ID in Convex to enable subscriptions.',
 	].join('\n');
 }
 
@@ -1775,7 +1813,7 @@ function billingCheckoutText(workspaceName: string, plan: PaidWorkspacePlan): st
 		`**Workspace:** ${workspaceName}`,
 		`**Plan:** ${plan}`,
 		'',
-		'Open Stripe Checkout to activate platform-hosted models for this workspace.',
+		'Open Polar Checkout to activate platform-hosted models for this workspace.',
 	].join('\n');
 }
 
@@ -1889,7 +1927,7 @@ function billingChoiceKeyboard(): InlineKeyboardMarkup {
 
 function billingCheckoutKeyboard(url: string): InlineKeyboardMarkup {
 	return inlineKeyboard([
-		[urlButton('Open Stripe Checkout', url)],
+		[urlButton('Open Polar Checkout', url)],
 		[callbackButton('Menu', 'ux:menu')],
 	]);
 }
@@ -1988,7 +2026,7 @@ async function startCodexDeviceLogin(
 		throw new Error(`Unable to start Codex login (${response.status}): ${await response.text()}`);
 	}
 
-	return (await response.json()) as CodexDeviceStartResponse;
+	return runEffect(responseJson(response, CodexDeviceStartResponseSchema, 'codex device login start'));
 }
 
 async function readCodexStatus(env: TelegramChannelBindings): Promise<CodexStatusResponse> {
@@ -1996,14 +2034,31 @@ async function readCodexStatus(env: TelegramChannelBindings): Promise<CodexStatu
 		throw new Error('CODEX_AUTH_VAULT Durable Object binding is not configured.');
 	}
 
-	const response = await env.CODEX_AUTH_VAULT.getByName('default').fetch(
-		new Request('https://codex-auth-vault/status'),
+	return runEffect(
+		retryIdempotent(
+			Effect.gen(function* () {
+				const response = yield* Effect.tryPromise({
+					try: () => env.CODEX_AUTH_VAULT!.getByName('default').fetch(new Request('https://codex-auth-vault/status')),
+					catch: (cause) =>
+						new AuthBridgeError({
+							operation: 'codex_auth.status',
+							message: 'Unable to read Codex auth status before receiving a response.',
+							cause,
+						}),
+					});
+					if (!response.ok) {
+						const body = yield* Effect.promise(() => response.text().catch(() => ''));
+						return yield* Effect.fail(
+							new AuthBridgeError({
+								operation: 'codex_auth.status',
+								message: `Unable to read Codex auth status (${response.status}): ${body}`,
+							}),
+						);
+					}
+				return yield* responseJson(response, CodexStatusResponseSchema, 'codex auth status');
+			}),
+		),
 	);
-	if (!response.ok) {
-		throw new Error(`Unable to read Codex auth status (${response.status}): ${await response.text()}`);
-	}
-
-	return (await response.json()) as CodexStatusResponse;
 }
 
 function codexStatusLine(status: CodexStatusResponse | undefined): string {
@@ -2091,7 +2146,7 @@ function modelOptionsText(): string {
 }
 
 function errorText(title: string, error: unknown): string {
-	return [`# ${title}`, '', mdCodeBlock(error instanceof Error ? error.message : String(error))].join('\n');
+	return [`# ${title}`, '', mdCodeBlock(renderUserError(error))].join('\n');
 }
 
 function mdInlineCode(value: string | number): string {

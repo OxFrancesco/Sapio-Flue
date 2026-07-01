@@ -1,4 +1,15 @@
 import { defineTool } from '@flue/runtime';
+import { Effect } from 'effect';
+import { ConfigMissing, DecodeError, ExternalHttpError } from './effect/errors';
+import { requireOkResponse, responseJson } from './effect/http';
+import { annotateFlow, retryIdempotent, runEffect } from './effect/runtime';
+import {
+	decodeUnknown,
+	InspectTeachingPageReferenceInputSchema,
+	PublishTeachingPageInputSchema,
+	TeachingPageIndexSchema,
+	TeachingPageRecordSchema,
+} from './effect/schemas';
 import {
 	buildTelegramAgentId,
 	isTelegramModelKey,
@@ -73,36 +84,69 @@ export function createTeachingPageTools({ env, agentId }: TeachingPageToolsOptio
 				required: ['path', 'content'],
 				additionalProperties: false,
 			},
-			async execute({ path, content, title, contentType }) {
-				const normalizedPath = normalizeTeachingPagePath(path);
-				const resolvedContentType = cleanContentType(contentType, normalizedPath);
-				assertReasonablePageSize(content);
+			async execute(input) {
+				return runEffect(
+					annotateFlow(
+						Effect.gen(function* () {
+							const { path, content, title, contentType } = yield* decodeUnknown(
+								PublishTeachingPageInputSchema,
+								input,
+								'publish_teaching_page input',
+							);
+							const normalizedPath = yield* normalizeTeachingPagePathEffect(path);
+							const resolvedContentType = cleanContentType(contentType, normalizedPath);
+							yield* assertReasonablePageSizeEffect(content);
 
-				const shareId = await shareIdForAgentId(agentId);
-				const response = await teachingPageStore(env, shareId).fetch(
-					new Request(`https://lesson-page-store/page?path=${encodeURIComponent(normalizedPath)}`, {
-						method: 'PUT',
-						headers: { 'content-type': 'application/json' },
-						body: JSON.stringify({
-							path: normalizedPath,
-							body: content,
-							title,
-							contentType: resolvedContentType,
+							const shareId = yield* Effect.tryPromise({
+								try: () => shareIdForAgentId(agentId),
+								catch: (cause) =>
+									new DecodeError({
+										source: 'teaching page share id',
+										message: 'Unable to calculate teaching page share id.',
+										cause,
+									}),
+							});
+							const store = teachingPageStore(env, shareId);
+							const response = yield* Effect.tryPromise({
+								try: () =>
+									store.fetch(
+										new Request(`https://lesson-page-store/page?path=${encodeURIComponent(normalizedPath)}`, {
+											method: 'PUT',
+											headers: { 'content-type': 'application/json' },
+											body: JSON.stringify({
+												path: normalizedPath,
+												body: content,
+												title,
+												contentType: resolvedContentType,
+											}),
+										}),
+									),
+								catch: (cause) =>
+									new ExternalHttpError({
+										operation: 'teaching_page.publish',
+										status: 0,
+										message: 'Unable to publish teaching page before receiving a response.',
+										cause,
+									}),
+							});
+							yield* requireOkResponse(
+								response,
+								'teaching_page.publish',
+								'Unable to publish teaching page',
+							);
+
+							const url = teachingPageUrl(env, shareId, normalizedPath);
+							return JSON.stringify({
+								url,
+								indexUrl: teachingPageIndexUrl(env, shareId),
+								shareId,
+								path: normalizedPath,
+								contentType: resolvedContentType,
+							});
 						}),
-					}),
+						{ agentId },
+					),
 				);
-				if (!response.ok) {
-					throw new Error(`Unable to publish teaching page (${response.status}): ${await response.text()}`);
-				}
-
-				const url = teachingPageUrl(env, shareId, normalizedPath);
-				return JSON.stringify({
-					url,
-					indexUrl: teachingPageIndexUrl(env, shareId),
-					shareId,
-					path: normalizedPath,
-					contentType: resolvedContentType,
-				});
 			},
 		}),
 		defineTool({
@@ -161,7 +205,14 @@ export function createTeachingPageTools({ env, agentId }: TeachingPageToolsOptio
 				required: ['reference'],
 				additionalProperties: false,
 			},
-			async execute({ reference, path, modelKey, includeContent }) {
+			async execute(input) {
+				const { reference, path, modelKey, includeContent } = await runEffect(
+					decodeUnknown(
+						InspectTeachingPageReferenceInputSchema,
+						input,
+						'inspect_teaching_page_reference input',
+					),
+				);
 				const resolved = await resolveTeachingPageReference({
 					reference,
 					currentAgentId: agentId,
@@ -415,7 +466,10 @@ export function isPageStorageKey(key: string): boolean {
 
 export function teachingPageStore(env: TeachingPageBindingEnv, shareId: string): DurableObjectStub {
 	if (!env.LESSON_PAGE_STORE) {
-		throw new Error('LESSON_PAGE_STORE Durable Object binding is not configured.');
+		throw new ConfigMissing({
+			name: 'LESSON_PAGE_STORE',
+			message: 'LESSON_PAGE_STORE Durable Object binding is not configured.',
+		});
 	}
 	return env.LESSON_PAGE_STORE.getByName(shareId);
 }
@@ -424,15 +478,29 @@ async function readTeachingPageIndex(
 	env: TeachingPageBindingEnv,
 	shareId: string,
 ): Promise<{ pages: Array<Pick<TeachingPageRecord, 'path' | 'title' | 'contentType' | 'updatedAt'>> }> {
-	const response = await teachingPageStore(env, shareId).fetch(
-		new Request('https://lesson-page-store/index'),
+	const store = teachingPageStore(env, shareId);
+	return runEffect(
+		annotateFlow(
+			retryIdempotent(
+				Effect.gen(function* () {
+					const response = yield* Effect.tryPromise({
+						try: () => store.fetch(new Request('https://lesson-page-store/index')),
+						catch: (cause) =>
+							new ExternalHttpError({
+								operation: 'teaching_page.index.read',
+								status: 0,
+								message: 'Unable to list teaching pages before receiving a response.',
+								cause,
+							}),
+					});
+					yield* requireOkResponse(response, 'teaching_page.index.read', 'Unable to list teaching pages');
+					const index = yield* responseJson(response, TeachingPageIndexSchema, 'teaching page index');
+					return { pages: Array.from(index.pages) };
+				}),
+			),
+			{ shareId },
+		),
 	);
-	if (!response.ok) {
-		throw new Error(`Unable to list teaching pages (${response.status}): ${await response.text()}`);
-	}
-	return (await response.json()) as {
-		pages: Array<Pick<TeachingPageRecord, 'path' | 'title' | 'contentType' | 'updatedAt'>>;
-	};
 }
 
 async function readTeachingPage(
@@ -440,13 +508,31 @@ async function readTeachingPage(
 	shareId: string,
 	path: string,
 ): Promise<TeachingPageRecord> {
-	const response = await teachingPageStore(env, shareId).fetch(
-		new Request(`https://lesson-page-store/page?path=${encodeURIComponent(path)}`),
+	const store = teachingPageStore(env, shareId);
+	return runEffect(
+		annotateFlow(
+			retryIdempotent(
+				Effect.gen(function* () {
+					const response = yield* Effect.tryPromise({
+						try: () =>
+							store.fetch(
+								new Request(`https://lesson-page-store/page?path=${encodeURIComponent(path)}`),
+							),
+						catch: (cause) =>
+							new ExternalHttpError({
+								operation: 'teaching_page.read',
+								status: 0,
+								message: 'Unable to read teaching page before receiving a response.',
+								cause,
+							}),
+					});
+					yield* requireOkResponse(response, 'teaching_page.read', 'Unable to read teaching page');
+					return yield* responseJson(response, TeachingPageRecordSchema, 'teaching page');
+				}),
+			),
+			{ shareId, path },
+		),
 	);
-	if (!response.ok) {
-		throw new Error(`Unable to read teaching page (${response.status}): ${await response.text()}`);
-	}
-	return (await response.json()) as TeachingPageRecord;
 }
 
 function assertReasonablePageSize(content: string): void {
@@ -454,6 +540,30 @@ function assertReasonablePageSize(content: string): void {
 	if (bytes > PAGE_MAX_BYTES) {
 		throw new Error(`Teaching page is too large (${bytes} bytes). Limit is ${PAGE_MAX_BYTES} bytes.`);
 	}
+}
+
+function normalizeTeachingPagePathEffect(path: string): Effect.Effect<string, DecodeError> {
+	return Effect.try({
+		try: () => normalizeTeachingPagePath(path),
+		catch: (cause) =>
+			new DecodeError({
+				source: 'teaching page path',
+				message: cause instanceof Error ? cause.message : String(cause),
+				cause,
+			}),
+	});
+}
+
+function assertReasonablePageSizeEffect(content: string): Effect.Effect<void, DecodeError> {
+	return Effect.try({
+		try: () => assertReasonablePageSize(content),
+		catch: (cause) =>
+			new DecodeError({
+				source: 'teaching page content',
+				message: cause instanceof Error ? cause.message : String(cause),
+				cause,
+			}),
+	});
 }
 
 function extractTeachingPageCandidate(reference: string): string {

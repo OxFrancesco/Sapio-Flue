@@ -15,7 +15,7 @@ const membershipStatus = v.union(v.literal('active'), v.literal('invited'), v.li
 const inviteStatus = v.union(v.literal('active'), v.literal('revoked'));
 const credentialProvider = v.union(v.literal('openai'));
 const credentialStatus = v.union(v.literal('active'), v.literal('revoked'));
-const billingProvider = v.union(v.literal('stripe'));
+const billingProvider = v.union(v.literal('stripe'), v.literal('polar'));
 const billingStatus = v.union(
 	v.literal('active'),
 	v.literal('trialing'),
